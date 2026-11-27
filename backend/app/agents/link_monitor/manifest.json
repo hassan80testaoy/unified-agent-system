@@ -1,0 +1,31 @@
+{
+  "key": "link_monitor",
+  "class_name": "LinkMonitorAgent",
+  "name_ar": "مراقب الروابط الخلفية",
+  "name_en": "Link Monitor",
+  "version": "1.0.0",
+  "category": "backlinks",
+  "priority": "P0",
+  "description_ar": "يفحص الروابط المسجلة دورياً للتحقق من أنها ما زالت حية واكتشاف أي تحول من dofollow إلى nofollow أو حذف.",
+  "description_en": "Periodically checks recorded backlink URLs to confirm links remain live and detect dofollow/nofollow changes.",
+  "tools_allowed": ["http"],
+  "daily_limit": 500,
+  "daily_budget_usd": 0.2,
+  "needs_approval": false,
+  "enabled": true,
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "limit": {"type": "integer", "title": "عدد الروابط للفحص", "default": 50},
+      "mock_mode": {"type": "boolean", "title": "وضع المحاكاة", "default": true}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "checked": {"type": "integer"},
+      "live": {"type": "integer"},
+      "lost": {"type": "integer"}
+    }
+  }
+}

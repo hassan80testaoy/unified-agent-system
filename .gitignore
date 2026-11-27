@@ -1,0 +1,41 @@
+# Environment & secrets (NEVER commit)
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.enc
+STOP
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Database & local data
+data/
+backups/
+*.db
+*.sqlite
+*.sqlite3
+
+# Node / Next.js
+web/node_modules/
+web/.next/
+web/out/
+web/.env*
+!web/.env.example
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# AEO working files (kept local per session)
+.aeo/

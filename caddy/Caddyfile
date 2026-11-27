@@ -1,0 +1,20 @@
+# Replace {$DOMAIN} with your real domain in .env (e.g., DOMAIN=app.yourdomain.com)
+{$DOMAIN:localhost} {
+    encode gzip zstd
+
+    # API & WebSocket proxy to FastAPI backend
+    handle /api/* {
+        reverse_proxy api:8000
+    }
+
+    # Next.js frontend
+    handle {
+        reverse_proxy web:3000
+    }
+
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+}

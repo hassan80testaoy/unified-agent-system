@@ -1,0 +1,91 @@
+{
+  "key": "backlink",
+  "class_name": "BacklinkAgent",
+  "name_ar": "وكيل الباك لينك بروفايلات",
+  "name_en": "Backlink Profiles",
+  "version": "1.0.0",
+  "category": "backlinks",
+  "priority": "P0",
+  "description_ar": "يسجل حسابات وبروفايلات باك لينك من قائمة المواقع المستوردة (Backlinks Farm) بقواعد الهوية والأنكرات الموزونة والبايو المتنوع وفحص noindex والتحقق الحي من الروابط dofollow/nofollow.",
+  "description_en": "Register profile backlinks from imported site lists using weighted anchors, varied bios, noindex pre-checks, manual noVNC CAPTCHA, Google/IMAP verification, step recording, and live link checks.",
+  "tools_allowed": ["browser", "mailbox", "google_account", "captcha", "llm", "http", "vault"],
+  "daily_limit": 100,
+  "daily_budget_usd": 3.0,
+  "needs_approval": false,
+  "enabled": true,
+  "default_delegation": {
+    "orchestrator": {"provider": "mock-local", "tier": "strong"},
+    "workers": {
+      "form_mapping": {"provider": "mock-local", "tier": "cheap"},
+      "bio": {"provider": "mock-local", "tier": "mid"},
+      "verify": {"provider": "mock-local", "tier": "cheap"}
+    },
+    "reviewer": {"provider": "ollama-local", "tier": "mid"}
+  },
+  "input_schema": {
+    "type": "object",
+    "required": ["target_domain"],
+    "properties": {
+      "target_domain": {
+        "type": "string",
+        "title": "الدومين الهدف",
+        "description": "مثال: moaazhassan.com",
+        "default": "moaazhassan.com"
+      },
+      "maps_url": {
+        "type": "string",
+        "title": "رابط خريطة جوجل (اختياري)",
+        "default": "https://maps.google.com/?q=Moaaz+Hassan+SEO"
+      },
+      "max_per_day": {
+        "type": "integer",
+        "title": "الحد الأقصى في اليوم",
+        "default": 10,
+        "minimum": 1,
+        "maximum": 200
+      },
+      "site_filter": {
+        "type": "string",
+        "title": "تصفية قائمة المواقع",
+        "enum": ["queued", "all_pending", "retry_failed"],
+        "default": "queued"
+      },
+      "auth_strategy": {
+        "type": "string",
+        "title": "طريقة التسجيل المفضلة",
+        "enum": ["google_first", "email_password"],
+        "default": "google_first"
+      },
+      "mailbox_id": {
+        "type": "string",
+        "title": "صندوق البريد (اختياري)"
+      },
+      "google_account_id": {
+        "type": "string",
+        "title": "حساب جوجل المربوط (اختياري)"
+      },
+      "run_mode": {
+        "type": "string",
+        "title": "نوع التشغيل",
+        "enum": ["once", "repeat"],
+        "default": "once"
+      },
+      "mock_mode": {
+        "type": "boolean",
+        "title": "وضع المحاكاة الآمن (بدون فتح مواقع حقيقية)",
+        "default": true
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "processed": {"type": "integer"},
+      "live": {"type": "integer"},
+      "pending_review": {"type": "integer"},
+      "excluded_noindex": {"type": "integer"},
+      "needs_manual": {"type": "integer"},
+      "failed": {"type": "integer"}
+    }
+  }
+}

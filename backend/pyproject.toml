@@ -1,0 +1,10 @@
+[project]
+name = "unified-agent-system-backend"
+version = "0.1.0"
+description = "Unified Agent System backend (FastAPI + SQLAlchemy 2 + Multi-Provider Router + Agent Registry)"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["."]

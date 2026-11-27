@@ -1,0 +1,14 @@
+# Site selector playbook template (non-hardcoded site config)
+site_slug: example-profile-site
+domain: example.org
+signup_url: https://example.org/signup
+supports_google_oauth: true
+profile_url_pattern: https://example.org/u/{username}
+selectors:
+  google_signin_btn: "button[data-provider='google'], a[href*='oauth/google']"
+  email_input: "input[type='email'], input[name='email']"
+  password_input: "input[type='password'], input[name='password']"
+  display_name_input: "input[name='display_name'], input[name='name']"
+  bio_textarea: "textarea[name='bio'], textarea[name='about']"
+  website_input: "input[name='website'], input[name='url']"
+  submit_btn: "button[type='submit']"

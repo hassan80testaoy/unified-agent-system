@@ -1,0 +1,104 @@
+# Unified Agent System — Provider Registry Example
+# Editable via Settings UI or YAML. Secrets stay in environment variables / Docker secrets, NEVER here.
+
+providers:
+  - id: anthropic
+    name: Anthropic Claude API
+    kind: llm
+    api_base: https://api.anthropic.com
+    auth: env:ANTHROPIC_API_KEY
+    models:
+      strong: claude-sonnet-4-5
+      mid: claude-sonnet-4-5
+      cheap: claude-haiku-4-5
+    budget_usd_daily: 5.0
+    budget_usd_monthly: 100.0
+    enabled: false
+
+  - id: openai
+    name: OpenAI API
+    kind: llm
+    api_base: https://api.openai.com/v1
+    auth: env:OPENAI_API_KEY
+    models:
+      strong: gpt-4.1
+      mid: gpt-4.1-mini
+      cheap: gpt-4.1-nano
+    budget_usd_daily: 3.0
+    budget_usd_monthly: 60.0
+    enabled: false
+
+  - id: groq-free
+    name: Groq Free Tier
+    kind: llm
+    api_base: https://api.groq.com/openai/v1
+    auth: env:GROQ_API_KEY
+    models:
+      strong: llama-3.3-70b-versatile
+      mid: llama-3.3-70b-versatile
+      cheap: llama-3.1-8b-instant
+    budget_usd_daily: 0.0
+    budget_usd_monthly: 0.0
+    enabled: false
+
+  - id: openrouter-free
+    name: OpenRouter Free Models
+    kind: llm
+    api_base: https://openrouter.ai/api/v1
+    auth: env:OPENROUTER_API_KEY
+    models:
+      strong: meta-llama/llama-3.3-70b-instruct:free
+      mid: google/gemma-3-27b-it:free
+      cheap: meta-llama/llama-3.2-3b-instruct:free
+    budget_usd_daily: 0.0
+    budget_usd_monthly: 0.0
+    enabled: false
+
+  - id: gemini-free
+    name: Gemini Free Tier API
+    kind: llm
+    api_base: https://generativelanguage.googleapis.com/v1beta
+    auth: env:GEMINI_API_KEY
+    models:
+      strong: gemini-2.5-pro
+      mid: gemini-2.5-flash
+      cheap: gemini-2.5-flash-lite
+    budget_usd_daily: 0.0
+    budget_usd_monthly: 0.0
+    enabled: false
+
+  - id: ollama-local
+    name: Ollama Local CPU/GPU
+    kind: llm-local
+    api_base: http://localhost:11434
+    auth: none
+    models:
+      strong: qwen2.5:7b
+      mid: qwen2.5:7b
+      cheap: qwen2.5:3b
+    budget_usd_daily: 0.0
+    budget_usd_monthly: 0.0
+    enabled: false
+
+  - id: mock-local
+    name: Local Mock Provider (Offline Testing)
+    kind: llm-mock
+    api_base: local://mock
+    auth: none
+    models:
+      strong: mock-strong-v1
+      mid: mock-mid-v1
+      cheap: mock-cheap-v1
+    budget_usd_daily: 0.0
+    budget_usd_monthly: 0.0
+    enabled: true
+
+  - id: captcha-manual
+    name: Human-in-the-Loop Manual noVNC Solver
+    kind: captcha
+    solver: manual
+    api_base: http://127.0.0.1:6080
+    auth: none
+    budget_usd_daily: 0.0
+    budget_usd_monthly: 0.0
+    enabled: true

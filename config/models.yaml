@@ -1,0 +1,51 @@
+# Model pricing & fallback chain configuration (USD per 1M tokens)
+# Update values here without modifying code.
+
+tiers:
+  strong:
+    fallback_chain: [anthropic, openai, groq-free, gemini-free, openrouter-free, ollama-local, mock-local]
+  mid:
+    fallback_chain: [openai, anthropic, gemini-free, groq-free, openrouter-free, ollama-local, mock-local]
+  cheap:
+    fallback_chain: [groq-free, openrouter-free, gemini-free, ollama-local, openai, anthropic, mock-local]
+
+pricing_per_1m_usd:
+  claude-sonnet-4-5:
+    input: 3.00
+    output: 15.00
+  claude-haiku-4-5:
+    input: 0.80
+    output: 4.00
+  gpt-4.1:
+    input: 2.00
+    output: 8.00
+  gpt-4.1-mini:
+    input: 0.40
+    output: 1.60
+  gpt-4.1-nano:
+    input: 0.10
+    output: 0.40
+  llama-3.3-70b-versatile:
+    input: 0.00
+    output: 0.00
+  llama-3.1-8b-instant:
+    input: 0.00
+    output: 0.00
+  gemini-2.5-pro:
+    input: 0.00
+    output: 0.00
+  gemini-2.5-flash:
+    input: 0.00
+    output: 0.00
+  gemini-2.5-flash-lite:
+    input: 0.00
+    output: 0.00
+  mock-strong-v1:
+    input: 0.00
+    output: 0.00
+  mock-mid-v1:
+    input: 0.00
+    output: 0.00
+  mock-cheap-v1:
+    input: 0.00
+    output: 0.00
