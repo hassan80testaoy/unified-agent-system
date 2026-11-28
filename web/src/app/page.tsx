@@ -66,6 +66,13 @@ export default function ChatHomePage() {
     browser_worker_error?: string | null;
     google_account: boolean;
     residential_proxy: boolean;
+    proxy_health?: {
+      configured?: boolean;
+      status?: string;
+      last_path?: string;
+      last_fell_back_to_direct?: boolean;
+      last_error?: string | null;
+    };
     real_chat_ready: boolean;
     real_backlink_ready: boolean;
     default_mock_mode: boolean;
@@ -466,6 +473,23 @@ export default function ChatHomePage() {
             >
               {runtimeReady.browser_worker ? t("phase6.browser_online") : t("phase6.browser_offline")}
             </span>
+            {runtimeReady.proxy_health && (
+              <span
+                className={`rounded-full border px-2 py-0.5 ${
+                  runtimeReady.proxy_health.status === "degraded_limit"
+                    ? "border-warning/60 bg-amber-500/10 text-warning"
+                    : runtimeReady.proxy_health.configured
+                    ? "border-success/40 bg-success/10 text-success"
+                    : "border-borderline bg-surface text-muted"
+                }`}
+              >
+                {runtimeReady.proxy_health.status === "degraded_limit"
+                  ? t("phase7.proxy_limit_fallback")
+                  : runtimeReady.proxy_health.configured
+                  ? t("phase6.proxy_ready")
+                  : t("phase7.proxy_direct")}
+              </span>
+            )}
             <span
               className={`rounded-full border px-2 py-0.5 ${
                 runtimeReady.google_account ? "border-success/50 bg-success/10 text-success" : "border-borderline text-muted"
@@ -584,12 +608,31 @@ export default function ChatHomePage() {
                 {m.role === "assistant" && (() => {
                   const mod = m.model_used || (m.card_payload?.model_used as string | undefined);
                   const msRaw = m.latency_ms ?? (m.card_payload?.latency_ms as number | undefined);
-                  if (!mod && msRaw === undefined) return null;
+                  const stats = m.card_payload?.stats as
+                    | {
+                        tokens_in?: number;
+                        tokens_out?: number;
+                        context_usage_pct?: number;
+                        cache_hit?: boolean;
+                        routing_profile?: string | null;
+                        model_latency_ms?: number;
+                        tool_latency_ms?: number;
+                      }
+                    | undefined;
+                  const netPath = m.card_payload?.network_path as string | undefined;
+                  if (!mod && msRaw === undefined && !stats && !netPath) return null;
                   const latFmt = msRaw !== undefined ? (msRaw >= 1000 ? `${(msRaw / 1000).toFixed(1)}s` : `${msRaw}ms`) : "";
                   return (
-                    <div className="mt-1 flex items-center gap-2 font-mono text-[10px] text-muted">
+                    <div className="mt-1 flex flex-wrap items-center gap-2 font-mono text-[10px] text-muted">
                       {mod && <bdi dir="ltr">{mod}</bdi>}
-                      {mod && latFmt && <span>·</span>}
+                      {stats?.routing_profile && <span className="rounded bg-surface px-1.5 py-0.5">profile:{stats.routing_profile}</span>}
+                      {netPath && <span className="rounded bg-surface px-1.5 py-0.5">net:{netPath}</span>}
+                      {stats && (stats.tokens_in || stats.tokens_out || stats.context_usage_pct) ? (
+                        <bdi dir="ltr">
+                          ctx={stats.context_usage_pct ?? 0}% ({stats.tokens_in ?? 0}/{stats.tokens_out ?? 0} tok)
+                          {stats.cache_hit ? " · CACHE" : ""}
+                        </bdi>
+                      ) : null}
                       {latFmt && <bdi dir="ltr">{latFmt}</bdi>}
                     </div>
                   );

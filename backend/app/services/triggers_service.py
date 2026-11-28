@@ -163,11 +163,14 @@ def tick_due_schedule_triggers(db: Session, now: datetime | None = None) -> list
 
 
 async def trigger_scheduler_loop(stop_event: asyncio.Event) -> None:
-    """Minute-granularity scheduler loop checking due cron triggers."""
+    """Minute-granularity scheduler loop checking due cron triggers & 08:00 owner digests."""
+    from app.services.daily_report_service import tick_daily_0800_reports
+
     while not stop_event.is_set():
         db = SessionLocal()
         try:
             tick_due_schedule_triggers(db)
+            tick_daily_0800_reports(db)
             db.commit()
         except Exception:
             db.rollback()

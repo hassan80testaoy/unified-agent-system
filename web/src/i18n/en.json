@@ -4,7 +4,9 @@
   "nav": {
     "chat": "Chat",
     "dashboard": "Dashboard",
+    "goals": "Goals & Audit",
     "coding_agent": "Coding Agent",
+    "reviews": "Unified Reviews",
     "teams": "Bots & Teams",
     "mcp": "MCP & Skills",
     "agents": "Agents",
@@ -223,5 +225,28 @@
     "browser_steps": "Live Browser Steps",
     "screenshots": "Live Screenshots",
     "open_full": "Open full size"
+  },
+  "phase7": {
+    "proxy_limit_fallback": "Proxy Limit (Direct Fallback)",
+    "proxy_direct": "Direct Browser",
+    "goals_hub_title": "Goals Planner, Site Auditor, Event Wakes & Proactive Loops",
+    "goals_hub_sub": "One-sentence goals, real browser SEO auditor with evidence, event-driven Gmail wakes, and 08:00 morning digest",
+    "tab_goals": "Goals",
+    "tab_auditor": "Site Auditor",
+    "tab_wakes": "Wakes & 08:00 Digest",
+    "tab_proactive": "6 Proactive Loops",
+    "goal_sentence_title": "State your goal in one sentence",
+    "plan_btn": "Build Plan & Run Auto-Steps",
+    "auditor_title": "Live Browser Technical SEO & Backlink Auditor",
+    "audit_run_btn": "Run Audited Check",
+    "wakes_sub_title": "Real Event Wake Subscriptions (No Polling)",
+    "daily_0800_title": "Daily 08:00 Report (Skipped if Quiet)",
+    "daily_0800_run": "Run Now",
+    "wakes_logs_title": "Wake Firing Ledger",
+    "proactive_hint": "The agent only proposes improvements — zero silent mutations without your explicit approval.",
+    "proactive_scan_btn": "Scan 6 Value Loops Now",
+    "reviews_title": "Unified Code Review (GitHub PRs & GitLab MRs)",
+    "reviews_sub": "Inspect diffs, CI checks, comment, and approve from a single screen",
+    "sync_btn": "Sync PRs / MRs"
   }
 }

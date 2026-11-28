@@ -71,6 +71,10 @@ class WakeSubscription(Base, TimestampMixin):
     source: Mapped[str] = mapped_column(String(32), nullable=False)  # gmail|calendar|imessage|location
     trigger_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     safety_checkin_hours: Mapped[int] = mapped_column(default=24, nullable=False)
+    filter_json: Mapped[dict[str, Any]] = mapped_column(PortableJSON, default=dict, nullable=False)
+    action_type: Mapped[str] = mapped_column(String(32), default="chat_notify", nullable=False)
+    thread_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

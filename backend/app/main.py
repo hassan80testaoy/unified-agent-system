@@ -22,6 +22,7 @@ from app.routers import (
     mail_google_router,
     mcp_router,
     modes_router,
+    phase7_router,
     tasks_runs_router,
     teams_triggers_router,
 )
@@ -29,8 +30,10 @@ from app.security.sanitizer import install_log_sanitizer
 from app.models.core import Workspace
 from app.services.browser_worker_manager import ensure_local_browser_worker_started, stop_local_browser_worker
 from app.services.coding_agent import resume_interrupted_threads
+from app.services.hypnos_service import get_or_create_hypnos_config
 from app.services.llm_router import seed_default_providers
 from app.services.model_catalogue import catalogue_daily_refresh_loop
+from app.services.routing_profiles import ensure_default_routing_profiles
 from app.services.triggers_service import trigger_scheduler_loop
 
 
@@ -43,6 +46,8 @@ async def lifespan(_app: FastAPI):
     try:
         for ws in db.query(Workspace).all():
             seed_default_providers(db, ws.id)
+            ensure_default_routing_profiles(db, ws.id)
+            get_or_create_hypnos_config(db, ws.id)
         resume_interrupted_threads(db)
         db.commit()
     except Exception:
@@ -101,3 +106,4 @@ app.include_router(chat_router.router)
 app.include_router(coding_router.router)
 app.include_router(mcp_router.router)
 app.include_router(teams_triggers_router.router)
+app.include_router(phase7_router.router)

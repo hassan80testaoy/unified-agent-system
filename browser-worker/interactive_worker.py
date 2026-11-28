@@ -80,34 +80,62 @@ async def _cleanup_stale_sessions() -> None:
         await _close_session_record(rec)
 
 
+def _build_interactive_launch_kwargs(
+    profile_dir: Path,
+    eff_proxy: str | None,
+    *,
+    bypass_proxy: bool,
+    headless: bool | None,
+) -> dict[str, Any]:
+    """Build Chromium launch kwargs while strictly enforcing bypass_proxy over env BROWSER_PROXY_URL."""
+    kwargs = _launch_kwargs(profile_dir, None if bypass_proxy else eff_proxy)
+    if bypass_proxy:
+        kwargs.pop("proxy", None)
+        kwargs.pop("ignore_https_errors", None)
+    elif isinstance(kwargs.get("proxy"), dict):
+        kwargs["proxy"].setdefault("bypass", "localhost,127.0.0.1")
+    kwargs["headless"] = _resolve_headless(headless)
+    return kwargs
+
+
 async def _get_or_create_session(
     *,
     session_id: str,
     profile_id: str,
     proxy: str | None,
     headless: bool | None,
+    bypass_proxy: bool = False,
 ) -> dict[str, Any]:
     from playwright.async_api import async_playwright
 
     await _cleanup_stale_sessions()
     sid = _safe_id(session_id)
     pid = _safe_id(profile_id, fallback="default")
+    eff_proxy = None if bypass_proxy else _resolve_proxy(proxy)
+    want_proxy_used = bool(eff_proxy)
 
+    stale_rec: dict[str, Any] | None = None
     async with _SESSIONS_META_LOCK:
         existing = _INTERACTIVE_SESSIONS.get(sid)
         if existing is not None:
-            existing["last_used"] = time.monotonic()
-            return existing
+            if bool(existing.get("proxy_used")) == want_proxy_used:
+                existing["last_used"] = time.monotonic()
+                return existing
+            stale_rec = _INTERACTIVE_SESSIONS.pop(sid, None)
+    if stale_rec is not None:
+        await _close_session_record(stale_rec)
 
     profile_dir = (PROFILES_DIR / f"interactive_{pid}_{sid[:16]}").resolve()
     if not str(profile_dir).startswith(str(PROFILES_DIR)):
         raise HTTPException(status_code=400, detail="Invalid profile_id")
     profile_dir.mkdir(parents=True, exist_ok=True)
 
-    kwargs = _launch_kwargs(profile_dir, _resolve_proxy(proxy))
-    if isinstance(kwargs.get("proxy"), dict):
-        kwargs["proxy"].setdefault("bypass", "localhost,127.0.0.1")
-    kwargs["headless"] = _resolve_headless(headless)
+    kwargs = _build_interactive_launch_kwargs(
+        profile_dir,
+        eff_proxy,
+        bypass_proxy=bool(bypass_proxy),
+        headless=headless,
+    )
 
     pw = await async_playwright().start()
     try:
@@ -123,6 +151,7 @@ async def _get_or_create_session(
     rec = {
         "session_id": sid,
         "profile_id": pid,
+        "proxy_used": want_proxy_used,
         "pw": pw,
         "context": context,
         "page": page,
@@ -250,6 +279,7 @@ class InteractiveOpenRequest(BaseModel):
     profile_id: str = "default"
     url: str = Field(min_length=1, max_length=2048)
     proxy: str | None = None
+    bypass_proxy: bool = False
     headless: bool | None = None
     wait_ms: int = 800
 
@@ -317,17 +347,24 @@ async def interactive_open(req: InteractiveOpenRequest) -> dict[str, Any]:
         profile_id=req.profile_id,
         proxy=req.proxy,
         headless=req.headless,
+        bypass_proxy=bool(req.bypass_proxy),
     )
     async with rec["lock"]:
         rec["last_used"] = time.monotonic()
         page = rec["page"]
         try:
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            resp = await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            http_status = int(resp.status) if resp is not None else None
             if req.wait_ms > 0:
                 await page.wait_for_timeout(min(req.wait_ms, 5000))
             rec["step"] = int(rec["step"]) + 1
             snap = await _snapshot_page(page, req.session_id, "open", rec["step"], capture_screenshot=True)
-            return {"ok": True, **snap}
+            return {
+                "ok": True,
+                "http_status": http_status,
+                "network_path": "proxy" if rec.get("proxy_used") else "direct",
+                **snap,
+            }
         except HTTPException:
             raise
         except Exception as exc:

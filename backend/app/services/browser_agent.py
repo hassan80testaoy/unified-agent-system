@@ -21,6 +21,7 @@ from app.security.sanitizer import discard_ephemeral_secret, register_ephemeral_
 from app.services.browser_worker_manager import resolve_browser_worker_url
 from app.services.llm_router import LLMRouter
 from app.services.mailbox import fetch_and_find_verification_imap, find_verification_from_messages
+from app.services.proxy_health import is_proxy_limit_or_auth_failure, record_proxy_outcome
 from app.services.runtime_checks import get_runtime_readiness
 from app.services.session_log import append_turn
 
@@ -72,11 +73,74 @@ class BrowserWorkerClient:
             raise RuntimeError(f"worker_http_{resp.status_code}: {resp.text[:240]}")
         return resp.json()
 
-    async def open(self, *, session_id: str, url: str, profile_id: str = "default", proxy: str | None = None) -> dict[str, Any]:
-        return await self.call(
-            "/interactive/open",
-            {"session_id": session_id, "profile_id": profile_id, "url": url, "proxy": proxy},
-        )
+    async def open(
+        self,
+        *,
+        session_id: str,
+        url: str,
+        profile_id: str = "default",
+        proxy: str | None = None,
+        bypass_proxy: bool = False,
+        allow_direct_fallback: bool = True,
+        db: Session | None = None,
+    ) -> dict[str, Any]:
+        is_local = url.startswith(("http://127.0.0.1", "http://localhost"))
+        has_cfg_proxy = bool(proxy or (get_settings().residential_proxy or "").strip())
+        eff_bypass = bool(bypass_proxy or is_local or not has_cfg_proxy)
+        payload = {
+            "session_id": session_id,
+            "profile_id": profile_id,
+            "url": url,
+            "proxy": None if eff_bypass else proxy,
+            "bypass_proxy": eff_bypass,
+        }
+        try:
+            snap = await self.call("/interactive/open", payload)
+        except Exception as exc:
+            reason = is_proxy_limit_or_auth_failure(error_text=str(exc)) if (not eff_bypass and allow_direct_fallback) else None
+            if reason is None:
+                if not eff_bypass and has_cfg_proxy:
+                    record_proxy_outcome(db, configured=True, path="proxy", fell_back_to_direct=False, error=str(exc)[:180], url=url)
+                raise
+            record_proxy_outcome(db, configured=True, path="direct_fallback", fell_back_to_direct=True, error=reason, url=url)
+            direct_snap = await self.call(
+                "/interactive/open",
+                {
+                    "session_id": session_id,
+                    "profile_id": profile_id,
+                    "url": url,
+                    "proxy": None,
+                    "bypass_proxy": True,
+                },
+            )
+            direct_snap["network_path"] = "direct_fallback"
+            direct_snap["proxy_fallback_reason"] = reason
+            return direct_snap
+
+        if not eff_bypass and allow_direct_fallback:
+            limit_reason = is_proxy_limit_or_auth_failure(snap=snap)
+            if limit_reason:
+                record_proxy_outcome(
+                    db, configured=True, path="direct_fallback", fell_back_to_direct=True, error=limit_reason, url=url
+                )
+                direct_snap = await self.call(
+                    "/interactive/open",
+                    {
+                        "session_id": session_id,
+                        "profile_id": profile_id,
+                        "url": url,
+                        "proxy": None,
+                        "bypass_proxy": True,
+                    },
+                )
+                direct_snap["network_path"] = "direct_fallback"
+                direct_snap["proxy_fallback_reason"] = limit_reason
+                return direct_snap
+            record_proxy_outcome(db, configured=True, path="proxy", fell_back_to_direct=False, url=url)
+            snap.setdefault("network_path", "proxy")
+        else:
+            snap.setdefault("network_path", "direct_fallback" if bypass_proxy else "direct")
+        return snap
 
     async def read(self, *, session_id: str, capture_screenshot: bool = False) -> dict[str, Any]:
         return await self.call("/interactive/read", {"session_id": session_id, "capture_screenshot": capture_screenshot})
@@ -407,22 +471,35 @@ async def run_general_browser_agent(
     paused_status: str | None = None
     paused_card: str | None = None
     summary_override: str | None = None
+    active_bypass_proxy = False
+    network_path = "proxy" if proxy else "direct"
+    proxy_fallback_reason: str | None = None
 
     async def _record_step(step_no: int, tool: str, snap: dict[str, Any], note: str = "") -> None:
-        nonlocal last_snap
+        nonlocal last_snap, active_bypass_proxy, network_path, proxy_fallback_reason
         last_snap = snap
+        step_net = str(snap.get("network_path") or network_path or "direct")
+        if step_net == "direct_fallback":
+            active_bypass_proxy = True
+            network_path = "direct_fallback"
+            proxy_fallback_reason = str(snap.get("proxy_fallback_reason") or proxy_fallback_reason or "proxy_limit")
+        elif snap.get("network_path"):
+            network_path = step_net
         sc_url = snap.get("screenshot_url")
         if sc_url and sc_url not in screenshots:
             screenshots.append(str(sc_url))
         cur_url = str(snap.get("url") or "")
         cur_title = str(snap.get("title") or "")
-        detail = note or f"{tool}: {cur_title or cur_url}"
+        path_badge = "مباشر (بديل البروكسي)" if step_net == "direct_fallback" else ("بروكسي" if step_net == "proxy" else "مباشر")
+        detail = note or f"{tool}: {cur_title or cur_url} [{path_badge}]"
         entry = {
             "step": step_no,
             "tool": tool,
             "status": "ok",
             "url": cur_url,
             "title": cur_title,
+            "network_path": step_net,
+            "proxy_fallback_reason": snap.get("proxy_fallback_reason"),
             "screenshot_url": sc_url,
             "detail": scrub_text(detail),
         }
@@ -435,6 +512,8 @@ async def run_general_browser_agent(
                 "tool": tool,
                 "url": cur_url,
                 "title": cur_title,
+                "network_path": step_net,
+                "proxy_fallback_reason": snap.get("proxy_fallback_reason"),
                 "screenshot_url": sc_url,
             },
         )
@@ -444,7 +523,13 @@ async def run_general_browser_agent(
     try:
         # Step 1: Open requested URL or execute live search with automatic DDG/Bing fallback on captcha/empty
         step_counter = 1
-        snap = await worker.open(session_id=session_id, url=initial_url, proxy=proxy)
+        snap = await worker.open(
+            session_id=session_id,
+            url=initial_url,
+            proxy=None if active_bypass_proxy else proxy,
+            bypass_proxy=active_bypass_proxy,
+            db=db,
+        )
         await _record_step(step_counter, "browser_open", snap)
 
         if is_search and query:
@@ -452,7 +537,13 @@ async def run_general_browser_agent(
             if snap.get("challenge") or "/sorry" in str(snap.get("url") or "").lower() or not organic:
                 ddg_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
                 try:
-                    ddg_snap = await worker.open(session_id=session_id, url=ddg_url, proxy=proxy)
+                    ddg_snap = await worker.open(
+                        session_id=session_id,
+                        url=ddg_url,
+                        proxy=None if active_bypass_proxy else proxy,
+                        bypass_proxy=active_bypass_proxy,
+                        db=db,
+                    )
                     step_counter += 1
                     snap = ddg_snap
                     await _record_step(step_counter, "browser_open", snap, f"بحث عبر DuckDuckGo عن: {query}")
@@ -462,7 +553,13 @@ async def run_general_browser_agent(
             if not organic:
                 bing_url = f"https://www.bing.com/search?q={quote_plus(query)}"
                 try:
-                    bing_snap = await worker.open(session_id=session_id, url=bing_url, proxy=proxy)
+                    bing_snap = await worker.open(
+                        session_id=session_id,
+                        url=bing_url,
+                        proxy=None if active_bypass_proxy else proxy,
+                        bypass_proxy=active_bypass_proxy,
+                        db=db,
+                    )
                     step_counter += 1
                     snap = bing_snap
                     await _record_step(step_counter, "browser_open", snap, f"بحث عبر Bing عن: {query}")
@@ -533,7 +630,13 @@ async def run_general_browser_agent(
 
             step_counter += 1
             if t_name == "browser_open" and t_args.get("url"):
-                snap = await worker.open(session_id=session_id, url=str(t_args["url"]), proxy=proxy)
+                snap = await worker.open(
+                    session_id=session_id,
+                    url=str(t_args["url"]),
+                    proxy=None if active_bypass_proxy else proxy,
+                    bypass_proxy=active_bypass_proxy,
+                    db=db,
+                )
                 await _record_step(step_counter, "browser_open", snap)
             elif t_name == "browser_read":
                 snap = await worker.read(session_id=session_id, capture_screenshot=False)
@@ -578,7 +681,13 @@ async def run_general_browser_agent(
                 if act and act.get("activation_url"):
                     act_url = str(act["activation_url"])
                     try:
-                        snap = await worker.open(session_id=session_id, url=act_url, proxy=proxy)
+                        snap = await worker.open(
+                            session_id=session_id,
+                            url=act_url,
+                            proxy=None if active_bypass_proxy else proxy,
+                            bypass_proxy=active_bypass_proxy,
+                            db=db,
+                        )
                         await _record_step(step_counter, "gmail_check_activation", snap, "فتح رابط التفعيل من البريد في نفس الجلسة")
                     finally:
                         discard_ephemeral_secret(act_url)
@@ -616,7 +725,15 @@ async def run_general_browser_agent(
         if any(phrase in low_sum for phrase in ("i cannot browse", "can't browse", "لا أستطيع التصفح", "لا يمكنني تصفح")):
             summary_ar = _deterministic_summary_ar(last_snap, is_search=is_search, query=query)
 
-        # Ensure screenshots & links are visible in plain text too
+        # Ensure network path & screenshots/links are clearly surfaced
+        if network_path == "direct_fallback":
+            summary_ar += (
+                f"\n\n🛰️ **مسار الاتصال:** مباشر بدون بروكسي (`direct_fallback` — بعد تعذر البروكسي: `{proxy_fallback_reason or 'limit'}`)"
+            )
+        else:
+            path_label = "بروكسي سكني (`proxy`)" if network_path == "proxy" else "اتصال مباشر (`direct`)"
+            summary_ar += f"\n\n🛰️ **مسار الاتصال:** {path_label}"
+
         if seen_links and not any(lk["href"] in summary_ar for lk in seen_links[:3]):
             summary_ar += "\n\n🔗 **الروابط الظاهرة:**\n" + "\n".join(
                 f"- [{lk['text']}]({lk['href']})" for lk in seen_links[:8]
@@ -629,6 +746,8 @@ async def run_general_browser_agent(
             "status": paused_status or "completed",
             "card_type": paused_card,
             "is_mock": is_mock_out,
+            "network_path": network_path,
+            "proxy_fallback_reason": proxy_fallback_reason,
             "current_url": last_snap.get("url") or initial_url,
             "page_title": last_snap.get("title") or "",
             "screenshots": screenshots,
@@ -643,11 +762,14 @@ async def run_general_browser_agent(
         err_report = (
             "⛔ **تعذر إتمام التصفح في المتصفح الحقيقي (توقف صادق):**\n"
             f"- الهدف: `{initial_url}`\n"
+            f"- مسار الاتصال: `{network_path}`\n"
             f"- السبب التقني: `{type(exc).__name__}: {scrub_text(str(exc)[:220])}`"
         )
         return {
             "status": "browser_error",
             "is_mock": False,
+            "network_path": network_path,
+            "proxy_fallback_reason": proxy_fallback_reason,
             "current_url": last_snap.get("url") or initial_url,
             "page_title": last_snap.get("title") or "",
             "screenshots": screenshots,

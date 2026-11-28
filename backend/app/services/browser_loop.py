@@ -498,17 +498,37 @@ async def _execute_real_backlink_browser_flow(
     session_id = f"bl_{(thread_id or account.id)[:12]}_{new_uuid()[:5]}"
     recorded_steps: list[dict[str, Any]] = []
     last_url = open_url
+    active_bypass_proxy = False
+    network_path = "proxy" if proxy else "direct"
+    proxy_fallback_reason: str | None = None
     now_iso = datetime.now(timezone.utc).isoformat()
     active_solver = solver or get_captcha_solver()
 
     async def _emit(step_num: int, name: str, status: str, detail: str, snap: dict[str, Any] | None = None) -> None:
-        nonlocal last_url
-        if snap and snap.get("url"):
-            last_url = str(snap["url"])
+        nonlocal last_url, active_bypass_proxy, network_path, proxy_fallback_reason
+        if snap:
+            if snap.get("url"):
+                last_url = str(snap["url"])
+            snet = str(snap.get("network_path") or "")
+            if snet == "direct_fallback":
+                active_bypass_proxy = True
+                network_path = "direct_fallback"
+                proxy_fallback_reason = str(snap.get("proxy_fallback_reason") or proxy_fallback_reason or "proxy_limit")
+            elif snet:
+                network_path = snet
         sc = snap.get("screenshot_url") if snap else None
         _stage(step_num, name, status, detail, screenshot_url=sc)
         if on_progress:
-            await on_progress({"step": step_num, "name": name, "status": status, "detail": detail, "screenshot_url": sc})
+            await on_progress(
+                {
+                    "step": step_num,
+                    "name": name,
+                    "status": status,
+                    "detail": detail,
+                    "screenshot_url": sc,
+                    "network_path": network_path,
+                }
+            )
 
     def _add_bl_step(n: int, action: str, selector_css: str | None = None, value_key: str | None = None, ok: int = 1) -> None:
         recorded_steps.append({"n": n, "action": action, "selector_css": selector_css, "value_key": value_key, "ok": ok})
@@ -526,12 +546,24 @@ async def _execute_real_backlink_browser_flow(
         )
 
     try:
-        # Step 1: Open actual site in Playwright
+        # Step 1: Open actual site in Playwright (with single direct fallback if configured proxy hits 401/limit)
         try:
-            snap = await worker.open(session_id=session_id, url=open_url, proxy=proxy)
+            snap = await worker.open(
+                session_id=session_id,
+                url=open_url,
+                proxy=None if active_bypass_proxy else proxy,
+                bypass_proxy=active_bypass_proxy,
+                db=db,
+            )
         except Exception:
             if not is_new_site and open_url != f"https://{clean_domain}":
-                snap = await worker.open(session_id=session_id, url=f"https://{clean_domain}", proxy=proxy)
+                snap = await worker.open(
+                    session_id=session_id,
+                    url=f"https://{clean_domain}",
+                    proxy=None if active_bypass_proxy else proxy,
+                    bypass_proxy=active_bypass_proxy,
+                    db=db,
+                )
             else:
                 raise
         _add_bl_step(1, "goto", value_key="signup_url", ok=1)
@@ -662,7 +694,13 @@ async def _execute_real_backlink_browser_flow(
                 break
 
             if t_name == "browser_open" and t_args.get("url"):
-                snap = await worker.open(session_id=session_id, url=str(t_args["url"]), proxy=proxy)
+                snap = await worker.open(
+                    session_id=session_id,
+                    url=str(t_args["url"]),
+                    proxy=None if active_bypass_proxy else proxy,
+                    bypass_proxy=active_bypass_proxy,
+                    db=db,
+                )
                 _add_bl_step(step_n, "goto", value_key="nav_url")
                 await _emit(min(step_n, 7), "navigate", "ok", f"الانتقال إلى {snap.get('url')}", snap)
             elif t_name == "browser_click":
@@ -696,7 +734,13 @@ async def _execute_real_backlink_browser_flow(
                 if act and act.get("activation_url"):
                     act_url = str(act["activation_url"])
                     try:
-                        snap = await worker.open(session_id=session_id, url=act_url, proxy=proxy)
+                        snap = await worker.open(
+                            session_id=session_id,
+                            url=act_url,
+                            proxy=None if active_bypass_proxy else proxy,
+                            bypass_proxy=active_bypass_proxy,
+                            db=db,
+                        )
                         _add_bl_step(5, "activate_email_link", value_key="ephemeral_activation_url")
                         await _emit(5, "email_activation", "ok", "تم تفعيل الحساب عبر البريد في نفس الجلسة", snap)
                     finally:
@@ -787,7 +831,13 @@ async def _execute_real_backlink_browser_flow(
             }
 
         # Step 8: Verify LIVE on public profile using Playwright + HTTP check
-        prof_snap = await worker.open(session_id=session_id, url=profile_url, proxy=proxy)
+        prof_snap = await worker.open(
+            session_id=session_id,
+            url=profile_url,
+            proxy=None if active_bypass_proxy else proxy,
+            bypass_proxy=active_bypass_proxy,
+            db=db,
+        )
         await _emit(8, "verify", "ok", f"فتح الصفحة العامة للتحقق: {profile_url}", prof_snap)
         chk = await verify_live_link_url(profile_url, eff_target_url)
         is_live = 1 if chk["found"] else 0
@@ -843,7 +893,10 @@ async def _execute_real_backlink_browser_flow(
                 "report_ar": f"فشل في خطوة 8: الحساب مسجل لكن الرابط غير ظاهر في الصفحة العامة ({profile_url}).",
             }
 
-        report_ar = f"تم ✅ — موقع {clean_domain}: حساب مسجل، إيميل مفعل، الباك لينك live ({link_type}) — {profile_url}"
+        report_ar = (
+            f"تم ✅ — موقع {clean_domain}: حساب مسجل، إيميل مفعل، الباك لينك live ({link_type}) "
+            f"[{network_path}] — {profile_url}"
+        )
         await _emit(9, "report", "ok", report_ar, prof_snap)
         return {
             "status": "done",
@@ -851,6 +904,8 @@ async def _execute_real_backlink_browser_flow(
             "account_id": account.id,
             "is_mock": False,
             "simulated": False,
+            "network_path": network_path,
+            "proxy_fallback_reason": proxy_fallback_reason,
             "profile_url": profile_url,
             "link_type": link_type,
             "report_ar": report_ar,
@@ -874,6 +929,8 @@ async def _execute_real_backlink_browser_flow(
             "domain": clean_domain,
             "is_mock": False,
             "simulated": False,
+            "network_path": network_path,
+            "proxy_fallback_reason": proxy_fallback_reason,
             "current_url": last_url,
             "screenshots": screenshots,
             "stages": stages,
@@ -881,6 +938,7 @@ async def _execute_real_backlink_browser_flow(
             "report_ar": (
                 f"⛔ **توقف صادق أثناء التصفح الحقيقي على {clean_domain}:**\n"
                 f"- آخر رابط: `{last_url}`\n"
+                f"- مسار الشبكة: `{network_path}`\n"
                 f"- سبب التوقف: `{safe_err}`\n"
                 "- لم يتم اختلاق أي حساب أو رابط باك لينك."
             ),

@@ -25,14 +25,36 @@ interface CaptchaStats {
   by_site: Record<string, { total: number; passed: number; skipped: number; timeout: number }>;
 }
 
+interface GscReportData {
+  connected: boolean;
+  site_url: string | null;
+  totals: { clicks: number; impressions: number; ctr: number; position: number; start_date: string; end_date: string } | null;
+  top_queries: Array<{ query: string; clicks: number; impressions: number; ctr: number; position: number }>;
+  report_ar: string;
+}
+
+interface UsageStatsData {
+  days: number;
+  total_calls: number;
+  cache_hits: number;
+  cache_hit_rate_pct: number;
+  total_context_tokens: number;
+  avg_latency_ms: number;
+  total_cost_usd: number;
+}
+
 export default function ReportsPage() {
   const { t, locale, formatNum, formatDate } = useApp();
   const [reports, setReports] = useState<ReportItem[]>([]);
   const [captchaStats, setCaptchaStats] = useState<CaptchaStats | null>(null);
+  const [gscReport, setGscReport] = useState<GscReportData | null>(null);
+  const [usageStats, setUsageStats] = useState<UsageStatsData | null>(null);
 
   const load = () => {
     apiFetch<{ reports: ReportItem[] }>("/api/reports").then((r) => setReports(r.reports)).catch(() => null);
     apiFetch<CaptchaStats>("/api/captcha/stats").then(setCaptchaStats).catch(() => null);
+    apiFetch<GscReportData>("/api/gsc/report").then(setGscReport).catch(() => null);
+    apiFetch<UsageStatsData>("/api/stats/usage").then(setUsageStats).catch(() => null);
   };
 
   useEffect(() => {
@@ -43,6 +65,14 @@ export default function ReportsPage() {
     await apiFetch("/api/reports/generate", {
       method: "POST",
       body: JSON.stringify({ period }),
+    });
+    load();
+  };
+
+  const runDaily0800 = async () => {
+    await apiFetch("/api/reports/daily-0800/run", {
+      method: "POST",
+      body: JSON.stringify({ enforce_hour: false, post_to_chat: true }),
     });
     load();
   };
@@ -61,7 +91,65 @@ export default function ReportsPage() {
           <button onClick={() => generate("weekly")} className="min-h-[40px] rounded-lg border border-borderline bg-surface px-4 text-xs font-semibold">
             {locale === "ar" ? "توليد تقرير أسبوعي" : "Generate Weekly"}
           </button>
+          <button onClick={runDaily0800} className="min-h-[40px] rounded-lg border border-primary/50 bg-primary/10 px-4 text-xs font-semibold text-primary">
+            {locale === "ar" ? "تقرير 08:00 الصباحي" : "Daily 08:00 Digest"}
+          </button>
         </div>
+      </div>
+
+      {/* §7E.1 Usage, Context & Latency Stats + §7A.2 Live GSC Report */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        {usageStats && (
+          <div className="rounded-xl border border-borderline bg-surface p-4 space-y-3 text-xs">
+            <h2 className="text-sm font-bold">{locale === "ar" ? "إحصائيات الاستهلاك والكاش والسرعة" : "Context, Cache & Latency Stats"}</h2>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <div className="rounded-lg bg-canvas p-2.5">
+                <div className="text-muted">{locale === "ar" ? "النداءات" : "Calls"}</div>
+                <div className="text-base font-bold">{formatNum(usageStats.total_calls)}</div>
+              </div>
+              <div className="rounded-lg bg-canvas p-2.5">
+                <div className="text-muted">{locale === "ar" ? "نسبة الكاش" : "Cache Hit"}</div>
+                <div className="text-base font-bold text-success">{usageStats.cache_hit_rate_pct}%</div>
+              </div>
+              <div className="rounded-lg bg-canvas p-2.5">
+                <div className="text-muted">{locale === "ar" ? "متوسط الزمن" : "Avg Latency"}</div>
+                <div className="text-base font-bold">{usageStats.avg_latency_ms}ms</div>
+              </div>
+              <div className="rounded-lg bg-canvas p-2.5">
+                <div className="text-muted">{locale === "ar" ? "رموز السياق" : "Context Tokens"}</div>
+                <div className="text-base font-bold">{formatNum(usageStats.total_context_tokens)}</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {gscReport && (
+          <div className="rounded-xl border border-borderline bg-surface p-4 space-y-2 text-xs">
+            <h2 className="text-sm font-bold">Google Search Console (Read-Only)</h2>
+            {!gscReport.connected || !gscReport.totals ? (
+              <div className="rounded-lg border border-dashed border-borderline bg-canvas p-3 space-y-1">
+                <div className="whitespace-pre-wrap text-muted">{gscReport.report_ar}</div>
+                <a href="/settings#connectors" className="inline-block font-semibold text-primary underline">
+                  {locale === "ar" ? "الانتقال إلى الإعدادات ← الموصلات للربط" : "Open Settings -> Connectors"}
+                </a>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex flex-wrap gap-3 font-mono text-[11px]">
+                  <span>clicks={gscReport.totals.clicks}</span>
+                  <span>impressions={gscReport.totals.impressions}</span>
+                  <span>pos={gscReport.totals.position}</span>
+                </div>
+                {gscReport.top_queries.slice(0, 5).map((q, idx) => (
+                  <div key={idx} className="flex items-center justify-between rounded bg-canvas px-2.5 py-1">
+                    <span>{q.query}</span>
+                    <span className="font-mono text-muted">c:{q.clicks} / i:{q.impressions} / p:{q.position}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Measured CAPTCHA Stats Panel */}

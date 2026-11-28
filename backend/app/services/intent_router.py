@@ -229,6 +229,21 @@ def classify_intent(text: str) -> dict[str, Any]:
         if kw in lower:
             return {"intent": "link_monitor", "confidence": 0.92, "matched_rule": kw, "entities": entities}
 
+    # 4b. Google Search Console live analytics report (§7A.2)
+    for kw in ("search console", "سيرش كونسول", "gsc", "نقرات البحث"):
+        if kw in lower:
+            return {"intent": "gsc_report", "confidence": 0.94, "matched_rule": kw, "entities": entities}
+
+    # 4c. Site Technical SEO & Backlink Auditor (§7A.3)
+    for kw in ("افحص موقع", "فحص موقع", "تدقيق موقع", "audit site", "site audit"):
+        if kw in lower:
+            return {"intent": "site_audit", "confidence": 0.94, "matched_rule": kw, "entities": entities}
+
+    # 4d. One-Sentence Goal Planner (§7A.1)
+    for kw in ("عايز موقعي", "يطلع الأول", "هدفي", "ضع خطة ل", "خطط لهدف", "goal:", "my goal"):
+        if kw in lower:
+            return {"intent": "goal_planner", "confidence": 0.94, "matched_rule": kw, "entities": entities}
+
     # 5. Reports
     for kw in _REPORTS_KEYWORDS:
         if kw in lower:

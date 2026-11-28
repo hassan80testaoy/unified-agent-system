@@ -18,6 +18,8 @@ from app.services.chat_agent import create_thread, process_user_message
 from app.services.mcp_service import (
     PermissionRevokedError,
     add_mcp_server,
+    configure_mcp_oauth,
+    ensure_mcp_oauth_fresh,
     execute_mcp_tool,
     get_read_only_auto_allow,
     grant_mcp_permission,
@@ -88,6 +90,16 @@ class SkillInstallRequest(BaseModel):
 class SkillRunRequest(BaseModel):
     tool_name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class McpOAuthConfigureRequest(BaseModel):
+    token_url: str
+    client_id: str
+    client_secret: str = ""
+    refresh_token: str = ""
+    access_token: str = ""
+    expires_in_sec: int = 3600
+    auto_refresh: bool = True
 
 
 @router.get("/api/mcp/servers")
@@ -167,6 +179,48 @@ def probe_mcp_server_endpoint(
     probe_mcp_server(db, srv, session_id=session_id)
     db.commit()
     return {"server": serialize_mcp_server(srv)}
+
+
+@router.post("/api/mcp/servers/{server_id}/oauth")
+def configure_mcp_server_oauth(
+    server_id: str,
+    req: McpOAuthConfigureRequest,
+    auth: AuthContext = Depends(require_roles("owner", "admin")),
+    db: Session = Depends(get_db),
+):
+    srv = db.get(McpServer, server_id)
+    if not srv or srv.workspace_id != auth.workspace.id:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "خادم MCP غير موجود", "message_en": "MCP server not found"})
+    configure_mcp_oauth(
+        db,
+        srv,
+        token_url=req.token_url,
+        client_id=req.client_id,
+        client_secret=req.client_secret,
+        refresh_token=req.refresh_token,
+        access_token=req.access_token,
+        expires_in_sec=req.expires_in_sec,
+        auto_refresh=req.auto_refresh,
+    )
+    db.commit()
+    return {"server": serialize_mcp_server(srv)}
+
+
+@router.post("/api/mcp/servers/{server_id}/oauth/refresh")
+def refresh_mcp_server_oauth(
+    server_id: str,
+    auth: AuthContext = Depends(require_roles("owner", "admin", "member")),
+    db: Session = Depends(get_db),
+):
+    srv = db.get(McpServer, server_id)
+    if not srv or srv.workspace_id != auth.workspace.id:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "خادم MCP غير موجود", "message_en": "MCP server not found"})
+    try:
+        res = ensure_mcp_oauth_fresh(db, srv, force=True)
+        db.commit()
+        return {"oauth": res, "server": serialize_mcp_server(srv)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"code": "oauth_refresh_failed", "message_ar": str(exc), "message_en": str(exc)}) from exc
 
 
 @router.delete("/api/mcp/servers/{server_id}")

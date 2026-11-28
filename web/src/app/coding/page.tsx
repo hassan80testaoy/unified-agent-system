@@ -160,6 +160,13 @@ export default function CodingAgentPage() {
   // Agents / Race / Hooks forms
   const [subagentRole, setSubagentRole] = useState("researcher");
   const [subagentPrompt, setSubagentPrompt] = useState("تحليل بنية الملفات وتلخيص النقاط المهمة");
+  const [delegateCli, setDelegateCli] = useState(false);
+  const [cliStatus, setCliStatus] = useState<{
+    local_mode?: boolean;
+    available_clis?: string[];
+    codex?: { installed: boolean; logged_in: boolean };
+    claude?: { installed: boolean; logged_in: boolean };
+  } | null>(null);
   const [racePrompt, setRacePrompt] = useState("تنفيذ دالة حسابية مع اجتياز الاختبارات");
   const [raceTestCmd, setRaceTestCmd] = useState("python -c \"import solution; assert solution.solve(2, 3) == 5\"");
   const [hookName, setHookName] = useState("");
@@ -187,12 +194,14 @@ export default function CodingAgentPage() {
   }, [selectedId]);
 
   const loadGlobals = useCallback(async () => {
-    const [gRes, hRes] = await Promise.all([
+    const [gRes, hRes, cRes] = await Promise.all([
       apiFetch<{ goals: GoalItem[] }>("/api/goals"),
       apiFetch<{ hooks: HookItem[] }>("/api/hooks"),
+      apiFetch<typeof cliStatus>("/api/coding/cli-status").catch(() => null),
     ]);
     setGoals(gRes.goals || []);
     setHooks(hRes.hooks || []);
+    if (cRes) setCliStatus(cRes);
   }, []);
 
   const loadThreadDetail = useCallback(async (id: string) => {
@@ -415,7 +424,7 @@ export default function CodingAgentPage() {
     try {
       await apiFetch(`/api/threads/${thread.id}/subagents`, {
         method: "POST",
-        body: JSON.stringify({ role: subagentRole, prompt: subagentPrompt.trim(), use_worktree: true }),
+        body: JSON.stringify({ role: subagentRole, prompt: subagentPrompt.trim(), use_worktree: true, delegate_cli: delegateCli }),
       });
       await Promise.all([loadThreadDetail(thread.id), loadList()]);
     } catch (err) {
@@ -969,6 +978,25 @@ export default function CodingAgentPage() {
                         <Bot className="h-3.5 w-3.5" />
                         {t("coding.spawn_subagent")}
                       </h3>
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                        <label className="flex items-center gap-1.5">
+                          <input
+                            type="checkbox"
+                            checked={delegateCli}
+                            onChange={(e) => setDelegateCli(e.target.checked)}
+                          />
+                          <span>
+                            {isAr
+                              ? "تفويض لـ Codex / Claude CLI المحلي عند توفره (وإلا مزود API احتياطي)"
+                              : "Delegate to logged-in local Codex/Claude CLI (clean API fallback if unavailable)"}
+                          </span>
+                        </label>
+                        {cliStatus && (
+                          <span className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 font-mono text-[10px]">
+                            CLIs: {cliStatus.available_clis?.length ? cliStatus.available_clis.join(",") : "API fallback"}
+                          </span>
+                        )}
+                      </div>
                       <div className="flex flex-wrap gap-2">
                         <select
                           value={subagentRole}

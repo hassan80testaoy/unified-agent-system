@@ -172,6 +172,34 @@ export default function SettingsPage() {
   const [newTrigEvent, setNewTrigEvent] = useState("");
   const [newTrigPrompt, setNewTrigPrompt] = useState("");
 
+  // Phase 7: Hermes Routing Profiles + Backups + Planner-Brain + Hypnos (OFF default) + Connectors/GSC/MCP OAuth
+  const [routingProfiles, setRoutingProfiles] = useState<
+    Array<{ context_key: string; provider_id: string | null; model: string; base_url: string; api_key_env: string; tier: string; enabled: boolean }>
+  >([]);
+  const [routingBackups, setRoutingBackups] = useState<Array<{ id: string; reason: string; file_path: string; created_at: string | null }>>([]);
+  const [plannerBrain, setPlannerBrain] = useState<{
+    config: { enabled: boolean; tasks: string[] };
+    stats: { runs: number; estimated_savings_usd: number; estimated_savings_pct: number; last_split?: { planner?: { model?: string }; executor?: { model?: string } } | null };
+  } | null>(null);
+  const [hypnosState, setHypnosState] = useState<{
+    config: { enabled: boolean; schedule_hour: number; active_lora_version_id: string | null; last_exam_score: number | null; prompt_tokens_before: number; prompt_tokens_after: number };
+    versions: Array<{ id: string; version_tag: string; status: string; exam_score: number; baseline_score: number; exam_passed: boolean; prompt_delta_tokens: number }>;
+    feedback_events: Array<{ id: string; kind: string; context_summary: string; excluded_for_unlearn: boolean }>;
+  } | null>(null);
+  const [connectors, setConnectors] = useState<{
+    gsc?: { connected: boolean; site_url: string | null; account_email: string | null };
+    mcp_servers?: Array<{ id: string; name: string; status: string; oauth_configured: boolean; oauth_auto_refresh: boolean; oauth_expires_at: string | null }>;
+    local_clis?: { available_clis: string[] };
+    proxy_health?: { status: string; last_error?: string | null };
+  } | null>(null);
+  const [gscSiteUrl, setGscSiteUrl] = useState("");
+  const [gscEmail, setGscEmail] = useState("");
+  const [gscToken, setGscToken] = useState("");
+  const [mcpOauthServerId, setMcpOauthServerId] = useState("");
+  const [mcpOauthUrl, setMcpOauthUrl] = useState("https://auth.example.com/oauth/token");
+  const [mcpOauthClientId, setMcpOauthClientId] = useState("");
+  const [mcpOauthRefreshTok, setMcpOauthRefreshTok] = useState("");
+
   const load = () => {
     apiFetch<{ providers: ProviderItem[] }>("/api/providers")
       .then((r) => {
@@ -211,6 +239,11 @@ export default function SettingsPage() {
     apiFetch<{ google_accounts: GoogleAccountItem[] }>("/api/google-accounts").then((r) => setGoogleAccounts(r.google_accounts)).catch(() => null);
     apiFetch<{ memory: MemoryItem[] }>("/api/memory").then((r) => setMemories(r.memory)).catch(() => null);
     apiFetch<{ tunnel: { ssh_command: string } }>("/api/settings").then((r) => setTunnelCmd(r.tunnel?.ssh_command || "")).catch(() => null);
+    apiFetch<{ profiles: typeof routingProfiles }>("/api/routing/profiles").then((r) => setRoutingProfiles(r.profiles || [])).catch(() => null);
+    apiFetch<{ backups: typeof routingBackups }>("/api/routing/backups").then((r) => setRoutingBackups(r.backups || [])).catch(() => null);
+    apiFetch<typeof plannerBrain>("/api/routing/planner-brain").then(setPlannerBrain).catch(() => null);
+    apiFetch<typeof hypnosState>("/api/hypnos/status").then(setHypnosState).catch(() => null);
+    apiFetch<typeof connectors>("/api/connectors/summary").then(setConnectors).catch(() => null);
   };
 
   const saveProviderBaseUrl = async (providerId: string) => {
@@ -262,6 +295,101 @@ export default function SettingsPage() {
 
   const deleteTriggerItem = async (tid: string) => {
     await apiFetch(`/api/triggers/${tid}`, { method: "DELETE" });
+    load();
+  };
+
+  const saveProfileRow = async (p: (typeof routingProfiles)[number]) => {
+    await apiFetch(`/api/routing/profiles/${p.context_key}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        provider_id: p.provider_id,
+        model: p.model,
+        base_url: p.base_url,
+        api_key_env: p.api_key_env,
+        tier: p.tier,
+        enabled: p.enabled,
+      }),
+    });
+    setStatusMsg(locale === "ar" ? `تم حفظ مسار ${p.context_key} مع نسخة احتياطية.` : `Saved ${p.context_key} profile with config backup.`);
+    load();
+  };
+
+  const runRoutingWizard = async () => {
+    const res = await apiFetch<{ backup_id: string }>("/api/routing/wizard/configure-model-routing", {
+      method: "POST",
+      body: JSON.stringify({ fetch_live_models: false }),
+    });
+    setStatusMsg(locale === "ar" ? `اكتمل المعالج مع حفظ نسخة احتياطية (${res.backup_id.slice(0, 8)}).` : `Routing wizard updated profiles (backup ${res.backup_id.slice(0, 8)}).`);
+    load();
+  };
+
+  const restoreRoutingBackup = async (backupId: string) => {
+    await apiFetch(`/api/routing/backups/${backupId}/restore`, { method: "POST" });
+    setStatusMsg(locale === "ar" ? "تمت استعادة الإعدادات من النسخة الاحتياطية." : "Restored routing profiles from backup.");
+    load();
+  };
+
+  const togglePlannerBrain = async (enabled: boolean) => {
+    await apiFetch("/api/routing/planner-brain", { method: "PUT", body: JSON.stringify({ enabled }) });
+    load();
+  };
+
+  const toggleHypnos = async (enabled: boolean) => {
+    await apiFetch("/api/hypnos/config", { method: "PATCH", body: JSON.stringify({ enabled }) });
+    setStatusMsg(locale === "ar" ? (enabled ? "تم تفعيل Hypnos اختيارياً." : "تم إيقاف Hypnos.") : `Hypnos ${enabled ? "enabled" : "disabled"}.`);
+    load();
+  };
+
+  const runHypnosNight = async () => {
+    const res = await apiFetch<{ trained?: boolean; reason?: string }>("/api/hypnos/night-run", { method: "POST" });
+    setStatusMsg(res.trained ? (locale === "ar" ? "اكتمل التدريب الليلي والاختبار." : "Night run + held-out exam finished.") : (res.reason || "Skipped (Hypnos OFF)"));
+    load();
+  };
+
+  const promoteHypnos = async (versionId: string) => {
+    await apiFetch(`/api/hypnos/versions/${versionId}/promote`, { method: "POST" });
+    setStatusMsg(locale === "ar" ? "تمت ترقية النسخة الفائزة في الامتحان." : "Promoted winning LoRA adapter.");
+    load();
+  };
+
+  const unlearnHypnosEvent = async (evId: string) => {
+    await apiFetch("/api/hypnos/unlearn", { method: "POST", body: JSON.stringify({ exclude_event_ids: [evId] }) });
+    setStatusMsg(locale === "ar" ? "تم مسح أثر الحدث وإعادة البناء من سلف نظيف." : "Unlearned event and rebuilt clean ancestor adapter.");
+    load();
+  };
+
+  const connectGscForm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gscSiteUrl.trim() || !gscEmail.trim() || !gscToken.trim()) return;
+    await apiFetch("/api/gsc/connect", {
+      method: "POST",
+      body: JSON.stringify({ site_url: gscSiteUrl.trim(), account_email: gscEmail.trim(), access_token: gscToken.trim() }),
+    });
+    setGscToken("");
+    setStatusMsg(locale === "ar" ? "تم ربط Google Search Console بصلاحية القراءة فقط." : "Connected GSC (Read-Only OAuth).");
+    load();
+  };
+
+  const saveMcpOauth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mcpOauthServerId) return;
+    await apiFetch(`/api/mcp/servers/${mcpOauthServerId}/oauth`, {
+      method: "POST",
+      body: JSON.stringify({
+        token_url: mcpOauthUrl,
+        client_id: mcpOauthClientId,
+        refresh_token: mcpOauthRefreshTok,
+        auto_refresh: true,
+      }),
+    });
+    setMcpOauthRefreshTok("");
+    setStatusMsg(locale === "ar" ? "تم حفظ OAuth والتجديد التلقائي لخادم MCP." : "Saved MCP OAuth auto-refresh.");
+    load();
+  };
+
+  const refreshMcpOauth = async (serverId: string) => {
+    await apiFetch(`/api/mcp/servers/${serverId}/oauth/refresh`, { method: "POST" });
+    setStatusMsg(locale === "ar" ? "تم تحديث توكن MCP بنجاح." : "Refreshed MCP OAuth token.");
     load();
   };
 
@@ -1311,6 +1439,190 @@ export default function SettingsPage() {
             {t("modes.create_title")}
           </button>
         </form>
+      </section>
+
+      {/* 2c. §7C Hermes Routing Profiles + Wizard + Backups + Planner-Brain */}
+      <section className="rounded-xl border border-borderline bg-surface p-4 space-y-4 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-bold">{locale === "ar" ? "ملفات التوجيه حسب السياق (Hermes) + المعالج" : "Hermes Routing Profiles & Wizard"}</h2>
+            <div className="text-muted">
+              {locale === "ar" ? "terminal/file → coding · web/browser → research · plan/spec → planning" : "Context rules with automatic config backup"}
+            </div>
+          </div>
+          <button type="button" onClick={runRoutingWizard} className="rounded-lg bg-primary px-3 py-1.5 font-semibold text-white">
+            {locale === "ar" ? "تشغيل المعالج (configure-model-routing)" : "Run configure-model-routing Wizard"}
+          </button>
+        </div>
+
+        <div className="grid gap-2 md:grid-cols-2">
+          {routingProfiles.map((rp) => (
+            <div key={rp.context_key} className="rounded-lg border border-borderline bg-canvas p-3 space-y-2">
+              <div className="flex items-center justify-between font-mono font-bold text-primary">
+                <span>[{rp.context_key}]</span>
+                <span>tier={rp.tier}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <input
+                  dir="ltr"
+                  value={rp.provider_id || ""}
+                  onChange={(e) =>
+                    setRoutingProfiles((prev) =>
+                      prev.map((x) => (x.context_key === rp.context_key ? { ...x, provider_id: e.target.value || null } : x))
+                    )
+                  }
+                  placeholder="provider_id (auto)"
+                  className="rounded border border-borderline bg-surface px-2 py-1 text-end font-mono"
+                />
+                <input
+                  dir="ltr"
+                  value={rp.model}
+                  onChange={(e) =>
+                    setRoutingProfiles((prev) =>
+                      prev.map((x) => (x.context_key === rp.context_key ? { ...x, model: e.target.value } : x))
+                    )
+                  }
+                  placeholder="model"
+                  className="rounded border border-borderline bg-surface px-2 py-1 text-end font-mono"
+                />
+              </div>
+              <button type="button" onClick={() => saveProfileRow(rp)} className="rounded bg-primary/15 px-2.5 py-1 font-semibold text-primary">
+                {t("common.save")}
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {plannerBrain && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-borderline bg-canvas p-3">
+            <div>
+              <div className="font-bold">Planner-Brain ({plannerBrain.config.enabled ? "Strong Plan + Cheap Exec" : "Uniform"})</div>
+              <div className="text-muted">
+                runs={plannerBrain.stats.runs} · saved=${plannerBrain.stats.estimated_savings_usd} ({plannerBrain.stats.estimated_savings_pct}%)
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => togglePlannerBrain(!plannerBrain.config.enabled)}
+              className={`rounded-lg px-3 py-1 font-semibold text-white ${plannerBrain.config.enabled ? "bg-success" : "bg-muted"}`}
+            >
+              {plannerBrain.config.enabled ? (locale === "ar" ? "مفعّل (انقر للتعطيل)" : "Enabled") : (locale === "ar" ? "معطّل (انقر للتفعيل)" : "Disabled")}
+            </button>
+          </div>
+        )}
+
+        {routingBackups.length > 0 && (
+          <div className="space-y-1">
+            <div className="font-semibold text-muted">{locale === "ar" ? "النسخ الاحتياطية قبل التعديل (استعادة فورية):" : "Config Backups:"}</div>
+            {routingBackups.slice(0, 4).map((b) => (
+              <div key={b.id} className="flex items-center justify-between rounded bg-canvas px-2.5 py-1.5">
+                <span className="font-mono text-[11px]">{b.reason} ({b.id.slice(0, 8)})</span>
+                <button type="button" onClick={() => restoreRoutingBackup(b.id)} className="text-primary underline">
+                  {locale === "ar" ? "استعادة" : "Restore"}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* 2d. §7D Hypnos Sleep-Learning (OPT-IN ONLY — OFF by default) */}
+      <section className="rounded-xl border border-borderline bg-surface p-4 space-y-3 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-bold">{locale === "ar" ? "Hypnos — التعلم الليلي الاختياري (معطّل افتراضياً)" : "Hypnos Sleep-Learning (OPT-IN ONLY, OFF by default)"}</h2>
+            <div className="text-muted">
+              {locale === "ar" ? "لا يتدرب على أي بيانات بدون تفعيل صريح، ولا يستبدل العقل إلا باجتياز اختبار التعميم." : "Zero training while OFF; requires held-out exam pass + promotion."}
+            </div>
+          </div>
+          {hypnosState && (
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => toggleHypnos(!hypnosState.config.enabled)}
+                className={`rounded-lg px-3 py-1.5 font-semibold text-white ${hypnosState.config.enabled ? "bg-success" : "bg-danger"}`}
+              >
+                {hypnosState.config.enabled ? (locale === "ar" ? "مفعّل (Opt-In)" : "Enabled (Opt-In)") : (locale === "ar" ? "معطّل افتراضياً" : "OFF (Default)")}
+              </button>
+              <button type="button" onClick={runHypnosNight} className="rounded-lg border border-borderline bg-canvas px-3 py-1.5 font-semibold">
+                {locale === "ar" ? "تشغيل الدورة الليلية" : "Run Night Cycle"}
+              </button>
+            </div>
+          )}
+        </div>
+        {hypnosState && (
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-4 rounded bg-canvas p-2.5 font-mono text-[11px]">
+              <span>active_lora={hypnosState.config.active_lora_version_id || "none"}</span>
+              <span>last_exam={hypnosState.config.last_exam_score ?? "n/a"}</span>
+              <span>prompt_tokens={hypnosState.config.prompt_tokens_before}→{hypnosState.config.prompt_tokens_after}</span>
+            </div>
+            {hypnosState.versions.map((v) => (
+              <div key={v.id} className="flex flex-wrap items-center justify-between gap-2 rounded bg-canvas px-3 py-2">
+                <span className="font-mono">{v.version_tag} [{v.status}] score={v.exam_score} (base={v.baseline_score}) · Δprompt=-{v.prompt_delta_tokens}</span>
+                {v.exam_passed && v.status === "exam_passed" && (
+                  <button type="button" onClick={() => promoteHypnos(v.id)} className="rounded bg-primary px-2.5 py-1 text-white">
+                    {locale === "ar" ? "ترقية النسخة" : "Promote"}
+                  </button>
+                )}
+              </div>
+            ))}
+            {hypnosState.feedback_events.slice(0, 4).map((ev) => (
+              <div key={ev.id} className="flex items-center justify-between rounded bg-canvas px-2.5 py-1 text-[11px]">
+                <span>[{ev.kind}] {ev.context_summary} {ev.excluded_for_unlearn ? "(unlearned)" : ""}</span>
+                {!ev.excluded_for_unlearn && (
+                  <button type="button" onClick={() => unlearnHypnosEvent(ev.id)} className="text-danger underline">
+                    {locale === "ar" ? "نسيان تام (Unlearn)" : "Unlearn"}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* 2e. §7E.3 Unified Connectors Tab (GSC Read-Only OAuth + MCP OAuth Auto-Refresh + Git/CLI) */}
+      <section id="connectors" className="rounded-xl border border-borderline bg-surface p-4 space-y-3 text-xs">
+        <h2 className="text-sm font-bold">{locale === "ar" ? "الموصلات الموحدة (Connectors) وتجديد MCP OAuth" : "Connectors Hub (GSC Read-Only + MCP OAuth Auto-Refresh)"}</h2>
+        {connectors && (
+          <div className="flex flex-wrap gap-2 font-mono text-[11px]">
+            <span className="rounded bg-canvas px-2 py-1">GSC: {connectors.gsc?.connected ? connectors.gsc.site_url : "disconnected"}</span>
+            <span className="rounded bg-canvas px-2 py-1">CLIs: {connectors.local_clis?.available_clis?.join(",") || "none"}</span>
+            <span className="rounded bg-canvas px-2 py-1">Proxy: {connectors.proxy_health?.status || "unknown"}</span>
+          </div>
+        )}
+        <form onSubmit={connectGscForm} className="grid gap-2 sm:grid-cols-4">
+          <input dir="ltr" value={gscSiteUrl} onChange={(e) => setGscSiteUrl(e.target.value)} placeholder="https://yoursite.com" className="rounded border border-borderline bg-canvas px-2 py-1.5 text-end font-mono" />
+          <input dir="ltr" value={gscEmail} onChange={(e) => setGscEmail(e.target.value)} placeholder="owner@gmail.com" className="rounded border border-borderline bg-canvas px-2 py-1.5 text-end font-mono" />
+          <input dir="ltr" type="password" value={gscToken} onChange={(e) => setGscToken(e.target.value)} placeholder="GSC Read-Only OAuth Token" className="rounded border border-borderline bg-canvas px-2 py-1.5 text-end font-mono" />
+          <button type="submit" className="rounded-lg bg-primary px-3 py-1.5 font-semibold text-white">
+            {locale === "ar" ? "ربط GSC (قراءة فقط)" : "Connect GSC Read-Only"}
+          </button>
+        </form>
+        {connectors?.mcp_servers && connectors.mcp_servers.length > 0 && (
+          <form onSubmit={saveMcpOauth} className="space-y-2 border-t border-borderline pt-2">
+            <div className="font-semibold">{locale === "ar" ? "تجديد MCP OAuth التلقائي:" : "MCP OAuth Auto-Refresh:"}</div>
+            <div className="grid gap-2 sm:grid-cols-4">
+              <select value={mcpOauthServerId} onChange={(e) => setMcpOauthServerId(e.target.value)} className="rounded border border-borderline bg-canvas px-2 py-1.5">
+                <option value="">Select MCP Server</option>
+                {connectors.mcp_servers.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name} {m.oauth_auto_refresh ? "(Auto-Refresh)" : ""}</option>
+                ))}
+              </select>
+              <input dir="ltr" value={mcpOauthUrl} onChange={(e) => setMcpOauthUrl(e.target.value)} placeholder="Token URL" className="rounded border border-borderline bg-canvas px-2 py-1.5 text-end font-mono" />
+              <input dir="ltr" value={mcpOauthClientId} onChange={(e) => setMcpOauthClientId(e.target.value)} placeholder="client_id" className="rounded border border-borderline bg-canvas px-2 py-1.5 text-end font-mono" />
+              <input dir="ltr" type="password" value={mcpOauthRefreshTok} onChange={(e) => setMcpOauthRefreshTok(e.target.value)} placeholder="refresh_token" className="rounded border border-borderline bg-canvas px-2 py-1.5 text-end font-mono" />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button type="submit" className="rounded-lg bg-primary px-3 py-1.5 font-semibold text-white">{t("common.save")}</button>
+              {connectors.mcp_servers.filter((m) => m.oauth_configured).map((m) => (
+                <button key={m.id} type="button" onClick={() => refreshMcpOauth(m.id)} className="rounded border border-borderline bg-canvas px-2.5 py-1">
+                  Refresh {m.name}
+                </button>
+              ))}
+            </div>
+          </form>
+        )}
       </section>
 
       {/* 3. Manual CAPTCHA & noVNC Tunnel */}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -444,6 +445,94 @@ def revoke_mcp_permission(db: Session, workspace_id: str, permission_id: str) ->
     return row
 
 
+def configure_mcp_oauth(
+    db: Session,
+    server: McpServer,
+    *,
+    token_url: str,
+    client_id: str,
+    client_secret: str = "",
+    refresh_token: str = "",
+    access_token: str = "",
+    expires_in_sec: int = 3600,
+    auto_refresh: bool = True,
+) -> McpServer:
+    """Store Fernet-encrypted OAuth credentials for an MCP server with optional auto-refresh."""
+    payload = {
+        "token_url": token_url.strip(),
+        "client_id": client_id.strip(),
+        "client_secret": client_secret.strip(),
+        "refresh_token": refresh_token.strip(),
+        "access_token": access_token.strip(),
+    }
+    server.oauth_config_enc = encrypt_secret(json.dumps(payload))
+    server.oauth_auto_refresh = bool(auto_refresh)
+    server.oauth_expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(0, int(expires_in_sec)))
+    db.flush()
+    return server
+
+
+def ensure_mcp_oauth_fresh(db: Session, server: McpServer, *, force: bool = False) -> dict[str, Any]:
+    """Auto-refresh MCP OAuth token when expired or expiring within 120s (NEVER leaks token)."""
+    if not server.oauth_config_enc:
+        return {"configured": False, "refreshed": False}
+    try:
+        cfg = json.loads(decrypt_secret(server.oauth_config_enc))
+    except Exception:
+        return {"configured": False, "refreshed": False, "error": "decrypt_failed"}
+
+    now = datetime.now(timezone.utc)
+    exp = server.oauth_expires_at
+    if exp and exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    needs = bool(force) or (exp is None) or (exp <= now + timedelta(seconds=120))
+    if not needs or (not force and not server.oauth_auto_refresh):
+        return {
+            "configured": True,
+            "refreshed": False,
+            "expires_at": exp.isoformat() if exp else None,
+            "has_access_token": bool(cfg.get("access_token")),
+        }
+
+    token_url = str(cfg.get("token_url") or "").strip()
+    refresh_tok = str(cfg.get("refresh_token") or "").strip()
+    if not token_url or not refresh_tok:
+        return {"configured": True, "refreshed": False, "error": "missing_refresh_token_or_url"}
+
+    resp = httpx.post(
+        token_url,
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_tok,
+            "client_id": str(cfg.get("client_id") or ""),
+            "client_secret": str(cfg.get("client_secret") or ""),
+        },
+        timeout=12.0,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"mcp_oauth_refresh_http_{resp.status_code}")
+
+    body = resp.json() or {}
+    new_access = str(body.get("access_token") or "").strip()
+    if not new_access:
+        raise RuntimeError("mcp_oauth_refresh_missing_access_token")
+    cfg["access_token"] = new_access
+    if body.get("refresh_token"):
+        cfg["refresh_token"] = str(body["refresh_token"]).strip()
+    expires_in = int(body.get("expires_in") or 3600)
+    new_exp = now + timedelta(seconds=max(60, expires_in))
+
+    server.oauth_config_enc = encrypt_secret(json.dumps(cfg))
+    server.oauth_expires_at = new_exp
+    db.flush()
+    return {
+        "configured": True,
+        "refreshed": True,
+        "expires_at": new_exp.isoformat(),
+        "has_access_token": True,
+    }
+
+
 def _call_mcp_tool_real(server: McpServer, raw_tool_name: str, arguments: dict[str, Any]) -> Any:
     env_map: dict[str, str] = {}
     if server.env_enc:
@@ -454,8 +543,17 @@ def _call_mcp_tool_real(server: McpServer, raw_tool_name: str, arguments: dict[s
 
     rpc_req = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": raw_tool_name, "arguments": arguments}}
     if server.url.strip():
+        headers = {"Content-Type": "application/json"}
+        if server.oauth_config_enc:
+            try:
+                ocfg = json.loads(decrypt_secret(server.oauth_config_enc))
+                tok = str(ocfg.get("access_token") or "").strip()
+                if tok:
+                    headers["Authorization"] = f"Bearer {tok}"
+            except Exception:
+                pass
         with httpx.Client(timeout=8.0) as client:
-            resp = client.post(server.url.strip(), json=rpc_req, headers={"Content-Type": "application/json"})
+            resp = client.post(server.url.strip(), json=rpc_req, headers=headers)
             if resp.status_code >= 400:
                 raise RuntimeError(f"mcp_call_http_{resp.status_code}")
             body = resp.json()
@@ -541,6 +639,8 @@ def execute_mcp_tool(
 
     tool_def = _find_tool(server, tool_name)
     assert tool_def is not None
+    if server.oauth_config_enc and server.oauth_auto_refresh:
+        ensure_mcp_oauth_fresh(db, server)
     result = _call_mcp_tool_real(server, tool_def["name"], dict(arguments or {}))
 
     if perm_id and eval_res.get("grant_mode") == "allow_once":
@@ -580,6 +680,9 @@ def serialize_mcp_server(s: McpServer) -> dict[str, Any]:
         "last_error": s.last_error,
         "tools": list(s.tools_json or []),
         "launch_fingerprint": s.launch_fingerprint,
+        "oauth_configured": bool(s.oauth_config_enc),
+        "oauth_auto_refresh": bool(s.oauth_auto_refresh),
+        "oauth_expires_at": s.oauth_expires_at.isoformat() if s.oauth_expires_at else None,
         "created_at": s.created_at.isoformat(),
     }
 

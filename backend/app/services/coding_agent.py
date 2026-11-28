@@ -122,6 +122,9 @@ def serialize_artifact(a: Artifact) -> dict[str, Any]:
 
 
 def serialize_goal(g: Goal) -> dict[str, Any]:
+    plan = dict(g.plan or {})
+    ckpt = dict(g.checkpoint_json or {})
+    steps = list(plan.get("steps") or [])
     return {
         "id": g.id,
         "workspace_id": g.workspace_id,
@@ -132,13 +135,20 @@ def serialize_goal(g: Goal) -> dict[str, Any]:
         "metric_name": g.metric_name,
         "metric_start": g.metric_start,
         "metric_target": g.metric_target,
+        "deadline": g.deadline.isoformat() if g.deadline else None,
         "schedule_cron": g.schedule_cron,
         "autopilot": g.autopilot,
         "status": g.status,
-        "plan": dict(g.plan or {}),
+        "plan": plan,
+        "steps": steps,
+        "progress": {
+            "completed_steps": int(ckpt.get("completed_steps", 0)),
+            "total_steps": int(ckpt.get("total_steps", len(steps))),
+            "progress_pct": float(ckpt.get("progress_pct", 0.0)),
+        },
         "plan_version": g.plan_version,
         "consecutive_failures": g.consecutive_failures,
-        "checkpoint": dict(g.checkpoint_json or {}),
+        "checkpoint": ckpt,
         "blocked_reason": g.blocked_reason,
         "created_at": g.created_at.isoformat(),
         "updated_at": g.updated_at.isoformat(),

@@ -11,6 +11,7 @@ from app.config import get_env_secret_by_ref, get_settings
 from app.models.google_account import GoogleAccount
 from app.models.providers import ApiKey, Provider
 from app.services.browser_worker_manager import probe_browser_worker, resolve_browser_worker_url
+from app.services.proxy_health import get_proxy_health
 
 _EMAIL_FMT_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 _PLACEHOLDER_LOCALS = {
@@ -130,6 +131,7 @@ def get_runtime_readiness(db: Session, workspace_id: str) -> dict[str, Any]:
     real_chat_ready = has_real_llm and has_browser_worker
     real_backlink_ready = has_real_llm and has_browser_worker and has_google_account and has_residential_proxy
 
+    proxy_health = get_proxy_health(db)
     return {
         "llm_provider": has_real_llm,
         "browser_worker": has_browser_worker,
@@ -137,6 +139,7 @@ def get_runtime_readiness(db: Session, workspace_id: str) -> dict[str, Any]:
         "browser_worker_error": worker_probe.get("error"),
         "google_account": has_google_account,
         "residential_proxy": has_residential_proxy,
+        "proxy_health": proxy_health,
         "real_chat_ready": real_chat_ready,
         "real_backlink_ready": real_backlink_ready,
         "default_mock_mode": not real_chat_ready,

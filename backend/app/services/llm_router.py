@@ -682,11 +682,41 @@ class LLMRouter:
         run_max_budget_usd: float | None = None,
         use_cache: bool = True,
         allow_mock_fallback: bool = True,
+        toolsets: list[str] | None = None,
+        goal_text: str | None = None,
+        profile_override: str | None = None,
     ) -> dict[str, Any]:
         clean_prompt = scrub_text(prompt)
         clean_system = scrub_text(system_prompt)
         explicit_model = preferred_model.strip() if isinstance(preferred_model, str) and preferred_model.strip() else None
         explicit_provider = preferred_provider
+        active_profile_key: str | None = None
+        profile_base_url: str = ""
+        profile_api_key_env: str = ""
+
+        # Hermes Routing Profiles (§7C.1) per context (chat/coding/planning/research)
+        if task_type not in {"healthcheck", "review"} and not preferred_provider:
+            from app.services.routing_profiles import resolve_routing_profile
+
+            prof = resolve_routing_profile(
+                self.db,
+                self.workspace_id,
+                task_type=task_type,
+                toolsets=toolsets,
+                goal_text=goal_text,
+                profile_override=profile_override,
+            )
+            if prof and prof.provider_id != exclude_provider:
+                active_profile_key = prof.context_key
+                if prof.provider_id:
+                    preferred_provider = prof.provider_id
+                    explicit_provider = prof.provider_id
+                if prof.tier:
+                    tier = prof.tier
+                if not explicit_model and prof.model and prof.model != "auto":
+                    explicit_model = prof.model
+                profile_base_url = (prof.base_url or "").strip()
+                profile_api_key_env = (prof.api_key_env or "").strip()
 
         # Lookup per-agent delegation override if no explicit preferred_provider passed
         if agent_id and not preferred_provider:
@@ -745,11 +775,31 @@ class LLMRouter:
 
         cache_key = ""
         if use_cache and tier == "cheap":
-            raw_k = f"{task_type}:{tier}:{preferred_provider}:{explicit_model}:{exclude_provider}:{clean_prompt}"
+            raw_k = f"{task_type}:{tier}:{active_profile_key}:{preferred_provider}:{explicit_model}:{exclude_provider}:{clean_prompt}"
             cache_key = hashlib.sha256(raw_k.encode("utf-8")).hexdigest()
             if cache_key in _CHEAP_CACHE:
                 cached = dict(_CHEAP_CACHE[cache_key])
                 cached["cached"] = True
+                cached["routing_profile"] = active_profile_key
+                self.db.add(
+                    LlmCall(
+                        workspace_id=self.workspace_id,
+                        run_id=run_id,
+                        agent_id=agent_id,
+                        route_id=f"profile:{active_profile_key}" if active_profile_key else None,
+                        provider_id=str(cached.get("provider_id") or "cache"),
+                        model=str(cached.get("model") or "auto"),
+                        tier=tier,
+                        task_type=task_type,
+                        tokens_in=int(cached.get("tokens_in") or 0),
+                        tokens_out=int(cached.get("tokens_out") or 0),
+                        cost_usd=0.0,
+                        latency_ms=0,
+                        cached=True,
+                        ok=True,
+                    )
+                )
+                self.db.flush()
                 return cached
 
         candidates = self._candidate_providers(
@@ -810,6 +860,10 @@ class LLMRouter:
 
                 if acct is not None and acct.key_ref_enc:
                     api_key = decrypt_secret(acct.key_ref_enc)
+                elif explicit_provider == prov.id and profile_api_key_env:
+                    api_key = get_env_secret_by_ref(f"env:{profile_api_key_env}") or _resolve_provider_api_key(
+                        self.db, self.workspace_id, prov
+                    )
                 else:
                     api_key = _resolve_provider_api_key(self.db, self.workspace_id, prov)
 
@@ -818,11 +872,24 @@ class LLMRouter:
                     last_error = f"missing_api_key:{prov.id}"
                     continue
 
+                call_prov = prov
+                if explicit_provider == prov.id and profile_base_url and profile_base_url != prov.api_base:
+                    from types import SimpleNamespace
+
+                    call_prov = SimpleNamespace(
+                        id=prov.id,
+                        kind=prov.kind,
+                        protocol=prov.protocol,
+                        api_base=profile_base_url,
+                        models_json=prov.models_json,
+                        config_json=prov.config_json,
+                    )
+
                 start = time.monotonic()
                 try:
                     _LAST_ACTUAL_MODEL.set(None)
                     raw_out, tok_in, tok_out = _call_provider_http(
-                        prov, model, api_key, clean_prompt, clean_system, json_schema
+                        call_prov, model, api_key, clean_prompt, clean_system, json_schema
                     )
                     actual_model = _LAST_ACTUAL_MODEL.get() or model
                     latency_ms = int((time.monotonic() - start) * 1000)
@@ -840,6 +907,7 @@ class LLMRouter:
                         workspace_id=self.workspace_id,
                         run_id=run_id,
                         agent_id=agent_id,
+                        route_id=f"profile:{active_profile_key}" if active_profile_key else None,
                         provider_id=prov.id,
                         model=actual_model,
                         tier=tier,
@@ -864,10 +932,12 @@ class LLMRouter:
                         "requested_model": model,
                         "tier": tier,
                         "task_type": task_type,
+                        "routing_profile": active_profile_key,
                         "output": parsed_out,
                         "raw_text": raw_out,
                         "tokens_in": tok_in,
                         "tokens_out": tok_out,
+                        "context_tokens_used": int(tok_in or 0) + int(tok_out or 0),
                         "cost_usd": cost,
                         "latency_ms": latency_ms,
                         "cached": False,
@@ -992,6 +1062,9 @@ class LLMRouter:
         run_max_budget_usd: float | None = None,
         allow_mock_fallback: bool = True,
         cancel_event: asyncio.Event | None = None,
+        toolsets: list[str] | None = None,
+        goal_text: str | None = None,
+        profile_override: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Yield streaming tokens with mid-stream cancel/killswitch/budget enforcement & sync fallback."""
         if is_killswitch_active(self.db):
@@ -1002,6 +1075,28 @@ class LLMRouter:
         clean_system = scrub_text(system_prompt)
         explicit_model = preferred_model.strip() if isinstance(preferred_model, str) and preferred_model.strip() else None
         explicit_provider = preferred_provider
+        active_profile_key: str | None = None
+
+        if task_type not in {"healthcheck", "review"} and not preferred_provider:
+            from app.services.routing_profiles import resolve_routing_profile
+
+            prof = resolve_routing_profile(
+                self.db,
+                self.workspace_id,
+                task_type=task_type,
+                toolsets=toolsets,
+                goal_text=goal_text,
+                profile_override=profile_override,
+            )
+            if prof and prof.provider_id != exclude_provider:
+                active_profile_key = prof.context_key
+                if prof.provider_id:
+                    preferred_provider = prof.provider_id
+                    explicit_provider = prof.provider_id
+                if prof.tier:
+                    tier = prof.tier
+                if not explicit_model and prof.model and prof.model != "auto":
+                    explicit_model = prof.model
 
         if task_type != "healthcheck":
             role_key = (
@@ -1202,6 +1297,7 @@ class LLMRouter:
                             workspace_id=self.workspace_id,
                             run_id=run_id,
                             agent_id=agent_id,
+                            route_id=f"profile:{active_profile_key}" if active_profile_key else None,
                             provider_id=prov.id,
                             model=actual_model,
                             tier=tier,
@@ -1220,9 +1316,11 @@ class LLMRouter:
                         "provider_id": prov.id,
                         "model": actual_model,
                         "requested_model": model,
+                        "routing_profile": active_profile_key,
                         "latency_ms": latency_ms,
                         "tokens_in": est_in,
                         "tokens_out": tok_out,
+                        "context_tokens_used": int(est_in or 0) + int(tok_out or 0),
                         "cost_usd": final_cost,
                         "is_mock": is_mock,
                         "text": "".join(accumulated),

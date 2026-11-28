@@ -19,11 +19,48 @@ from app.security.sanitizer import scrub_text
 from app.services.browser_agent import run_general_browser_agent
 from app.services.browser_loop import run_flagship_backlink_loop
 from app.services.events import ws_hub
+from app.services.goal_planner import plan_goal_from_sentence
+from app.services.gsc_service import fetch_gsc_report
 from app.services.intent_router import classify_intent
 from app.services.llm_router import LLMRouter
 from app.services.modes import seed_default_modes
 from app.services.runtime_checks import get_runtime_readiness, validate_real_email
 from app.services.session_log import append_turn, get_session_log_path, rewind_log
+from app.services.site_auditor import audit_site_url
+
+
+def _build_turn_stats(
+    *,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    context_window: int = 32768,
+    cache_hit: bool = False,
+    model_latency_ms: int = 0,
+    tool_latency_ms: int = 0,
+    total_latency_ms: int | None = None,
+    model_used: str | None = None,
+    provider_id: str | None = None,
+    routing_profile: str | None = None,
+    cost_usd: float = 0.0,
+) -> dict[str, Any]:
+    used = int(tokens_in or 0) + int(tokens_out or 0)
+    win = max(1024, int(context_window or 32768))
+    tot_ms = int(total_latency_ms if total_latency_ms is not None else (int(model_latency_ms or 0) + int(tool_latency_ms or 0)))
+    return {
+        "tokens_in": int(tokens_in or 0),
+        "tokens_out": int(tokens_out or 0),
+        "context_tokens_used": used,
+        "context_window": win,
+        "context_usage_pct": round(min(100.0, (used / win) * 100.0), 2),
+        "cache_hit": bool(cache_hit),
+        "model_latency_ms": int(model_latency_ms or 0),
+        "tool_latency_ms": int(tool_latency_ms or 0),
+        "total_latency_ms": tot_ms,
+        "model_used": model_used,
+        "provider_id": provider_id,
+        "routing_profile": routing_profile,
+        "cost_usd": round(float(cost_usd or 0.0), 6),
+    }
 
 
 def create_thread(
@@ -210,6 +247,7 @@ async def process_user_message(
         .first()
     )
 
+    t_msg_start = time.monotonic()
     reply_payload: dict[str, Any]
     if intent == "flights":
         reply_payload = _handle_flights(db, thread.workspace_id, clean_text)
@@ -217,6 +255,42 @@ async def process_user_message(
         reply_payload = _handle_mail(db, thread.workspace_id)
     elif intent == "link_monitor":
         reply_payload = _handle_link_monitor(db, thread.workspace_id)
+    elif intent == "gsc_report":
+        g_res = fetch_gsc_report(db, workspace_id=thread.workspace_id, days=28)
+        reply_payload = {
+            "content": g_res["report_ar"],
+            "card_type": "gsc_report",
+            "card_payload": {**g_res, "is_mock": False},
+        }
+    elif intent == "site_audit":
+        target_aud_url = str(entities.get("url") or (f"https://{entities['domain']}" if entities.get("domain") else "")).strip()
+        if not target_aud_url:
+            reply_payload = {
+                "content": "🔍 **فاحص الموقع (Site Auditor):** يرجى ذكر رابط الموقع المطلوب فحصه (مثال: `افحص موقع https://example.com`).",
+                "card_type": None,
+                "card_payload": {"need": ["url"], "is_mock": False},
+            }
+        else:
+            aud_res = await audit_site_url(db, workspace_id=thread.workspace_id, url=target_aud_url)
+            reply_payload = {
+                "content": aud_res["report_md"],
+                "card_type": "site_audit",
+                "card_payload": {**aud_res, "is_mock": False},
+            }
+    elif intent == "goal_planner":
+        gp_res = await plan_goal_from_sentence(
+            db,
+            workspace_id=thread.workspace_id,
+            user_id=user_id,
+            sentence=clean_text,
+            thread_id=thread.id,
+            execute_auto_steps=True,
+        )
+        reply_payload = {
+            "content": gp_res["report_ar"],
+            "card_type": "goal_plan",
+            "card_payload": {"goal": gp_res["goal"], "is_mock": False},
+        }
     elif intent == "reports":
         reply_payload = _handle_reports(db, thread.workspace_id)
     elif intent == "backlink":
@@ -265,6 +339,7 @@ async def process_user_message(
                     "card_payload": loop_res,
                 }
     elif intent == "browser":
+        t_tool0 = time.monotonic()
         b_res = await run_general_browser_agent(
             db,
             thread_id=thread.id,
@@ -274,6 +349,7 @@ async def process_user_message(
             entities=entities,
             mock_mode=bool(mock_mode),
         )
+        tool_ms = int((time.monotonic() - t_tool0) * 1000)
         reply_payload = {
             "content": b_res["report_ar"],
             "card_type": b_res.get("card_type"),
@@ -281,12 +357,21 @@ async def process_user_message(
                 "status": b_res.get("status"),
                 "current_url": b_res.get("current_url"),
                 "page_title": b_res.get("page_title"),
+                "network_path": b_res.get("network_path"),
+                "proxy_fallback_reason": b_res.get("proxy_fallback_reason"),
                 "screenshots": b_res.get("screenshots") or [],
                 "links": b_res.get("links") or [],
                 "stages": b_res.get("stages") or [],
                 "runtime_status": b_res.get("runtime_status"),
                 "model_used": b_res.get("model_used"),
                 "latency_ms": b_res.get("latency_ms"),
+                "stats": _build_turn_stats(
+                    model_latency_ms=int(b_res.get("latency_ms") or 0),
+                    tool_latency_ms=tool_ms,
+                    total_latency_ms=tool_ms,
+                    model_used=b_res.get("model_used"),
+                    routing_profile="research",
+                ),
                 "is_mock": bool(b_res.get("is_mock", False)),
             },
         }
@@ -296,22 +381,34 @@ async def process_user_message(
             res = router.route(
                 task_type="coding",
                 tier="mid",
+                toolsets=["terminal", "file"],
                 prompt=clean_text,
                 system_prompt="You are a general-purpose software engineer assistant. Provide a concise Arabic plan and next action.",
                 use_cache=False,
             )
             ans = res.get("raw_text") or ""
             is_mock_coding = bool(res.get("is_mock", False))
+            stats = _build_turn_stats(
+                tokens_in=int(res.get("tokens_in") or 0),
+                tokens_out=int(res.get("tokens_out") or 0),
+                cache_hit=bool(res.get("cached")),
+                model_latency_ms=int(res.get("latency_ms") or 0),
+                model_used=res.get("model"),
+                provider_id=res.get("provider_id"),
+                routing_profile=res.get("routing_profile") or "coding",
+                cost_usd=float(res.get("cost_usd") or 0.0),
+            )
         except Exception:
             ans = ""
             is_mock_coding = False
+            stats = _build_turn_stats(routing_profile="coding")
         reply_payload = {
             "content": (
                 "💻 **تم توجيه طلبك إلى وكيل البرمجة العام (Coding Agent):**\n"
                 + (ans or "يمكنك فتح صفحة **وكيل البرمجة (`/coding`)** لإنشاء الخطة ومعاينة التصميم والتشغيل في المتصفح الحي.")
             ),
             "card_type": None,
-            "card_payload": {"mode": thread.mode_key, "is_mock": is_mock_coding, "coding_route": "/coding"},
+            "card_payload": {"mode": thread.mode_key, "is_mock": is_mock_coding, "coding_route": "/coding", "stats": stats},
         }
     else:
         router = LLMRouter(db, thread.workspace_id)
@@ -326,10 +423,12 @@ async def process_user_message(
         latency_ms = None
         # §6.0.6: Never pre-stamp mock from toggle before checking actual router output
         is_mock_reply = False
+        stats = _build_turn_stats(routing_profile="chat")
         try:
             res = router.route(
                 task_type="chat",
                 tier="cheap",
+                goal_text=clean_text,
                 prompt=clean_text,
                 system_prompt=sys_prompt,
                 use_cache=False,
@@ -338,9 +437,21 @@ async def process_user_message(
             model_used = res.get("model")
             latency_ms = res.get("latency_ms")
             is_mock_reply = bool(res.get("is_mock"))
+            stats = _build_turn_stats(
+                tokens_in=int(res.get("tokens_in") or 0),
+                tokens_out=int(res.get("tokens_out") or 0),
+                cache_hit=bool(res.get("cached")),
+                model_latency_ms=int(latency_ms or 0),
+                total_latency_ms=int((time.monotonic() - t_start) * 1000),
+                model_used=model_used,
+                provider_id=res.get("provider_id"),
+                routing_profile=res.get("routing_profile") or "chat",
+                cost_usd=float(res.get("cost_usd") or 0.0),
+            )
         except Exception:
             answer = "تم استلام رسالتك. يرجى ضبط مزود ذكاء اصطناعي نشط في الإعدادات للحصول على إجابة من النموذج."
             latency_ms = int((time.monotonic() - t_start) * 1000)
+            stats = _build_turn_stats(total_latency_ms=latency_ms, routing_profile="chat")
         if is_mock_reply and not answer.startswith("محاكاة — "):
             answer = f"محاكاة — {answer}"
         elif not is_mock_reply and answer.startswith("محاكاة — "):
@@ -352,9 +463,21 @@ async def process_user_message(
                 "mode": thread.mode_key,
                 "model_used": model_used,
                 "latency_ms": latency_ms,
+                "stats": stats,
                 "is_mock": is_mock_reply,
             },
         }
+
+    # Ensure every specialized reply also carries consistent stats telemetry (§7E.1)
+    cp_obj = dict(reply_payload.get("card_payload") or {})
+    if "stats" not in cp_obj:
+        elapsed_ms = int((time.monotonic() - t_msg_start) * 1000)
+        cp_obj["stats"] = _build_turn_stats(
+            tool_latency_ms=elapsed_ms,
+            total_latency_ms=elapsed_ms,
+            model_used=cp_obj.get("model_used"),
+        )
+        reply_payload["card_payload"] = cp_obj
 
     asst_seq = user_seq + 1
     asst_msg = ChatMessage(
@@ -538,7 +661,7 @@ async def stream_user_message(
     _ACTIVE_STREAMS[thread.id] = cancel_ev
     try:
         # Specialized workflows execute via handlers and emit live progress + chunked + final metadata
-        if intent in {"flights", "agent-mail", "link_monitor", "reports", "backlink", "browser"}:
+        if intent in {"flights", "agent-mail", "link_monitor", "reports", "backlink", "browser", "goal_planner", "gsc_report", "site_audit"}:
             t0 = time.monotonic()
             model_used: str | None = None
             card_type: str | None = None
@@ -554,6 +677,26 @@ async def stream_user_message(
                 r = _handle_mail(db, thread.workspace_id)
             elif intent == "link_monitor":
                 r = _handle_link_monitor(db, thread.workspace_id)
+            elif intent == "gsc_report":
+                g_res = fetch_gsc_report(db, workspace_id=thread.workspace_id, days=28)
+                r = {"content": g_res["report_ar"], "card_type": "gsc_report", "card_payload": {**g_res, "is_mock": False}}
+            elif intent == "site_audit":
+                t_aud = str(entities.get("url") or (f"https://{entities['domain']}" if entities.get("domain") else "")).strip()
+                if not t_aud:
+                    r = {"content": "🔍 **فاحص الموقع:** يرجى ذكر رابط الموقع المطلوب فحصه.", "card_type": None, "card_payload": {"is_mock": False}}
+                else:
+                    aud_res = await audit_site_url(db, workspace_id=thread.workspace_id, url=t_aud)
+                    r = {"content": aud_res["report_md"], "card_type": "site_audit", "card_payload": {**aud_res, "is_mock": False}}
+            elif intent == "goal_planner":
+                gp_res = await plan_goal_from_sentence(
+                    db,
+                    workspace_id=thread.workspace_id,
+                    user_id=user_id,
+                    sentence=clean_text,
+                    thread_id=thread.id,
+                    execute_auto_steps=True,
+                )
+                r = {"content": gp_res["report_ar"], "card_type": "goal_plan", "card_payload": {"goal": gp_res["goal"], "is_mock": False}}
             elif intent == "reports":
                 r = _handle_reports(db, thread.workspace_id)
             elif intent == "browser":
@@ -590,6 +733,8 @@ async def stream_user_message(
                         "status": b_res.get("status"),
                         "current_url": b_res.get("current_url"),
                         "page_title": b_res.get("page_title"),
+                        "network_path": b_res.get("network_path"),
+                        "proxy_fallback_reason": b_res.get("proxy_fallback_reason"),
                         "screenshots": b_res.get("screenshots") or [],
                         "links": b_res.get("links") or [],
                         "stages": b_res.get("stages") or [],
@@ -658,6 +803,13 @@ async def stream_user_message(
             card_payload.setdefault("latency_ms", latency_ms)
             if model_used:
                 card_payload["model_used"] = model_used
+            card_payload["stats"] = _build_turn_stats(
+                model_latency_ms=int(card_payload.get("latency_ms") or 0) if model_used else 0,
+                tool_latency_ms=latency_ms,
+                total_latency_ms=latency_ms,
+                model_used=model_used,
+                routing_profile="research" if intent in {"browser", "site_audit", "gsc_report"} else ("planning" if intent == "goal_planner" else None),
+            )
             actual_is_mock = bool(card_payload.get("is_mock", False))
             yield {"event": "token", "data": {"token": full_text, "model": model_used or "", "is_mock": actual_is_mock}}
 
@@ -683,6 +835,7 @@ async def stream_user_message(
                     "seq": asst_seq,
                     "model_used": model_used,
                     "latency_ms": latency_ms,
+                    "stats": card_payload["stats"],
                     "is_mock": actual_is_mock,
                     "content": asst_msg.content,
                     "card_type": card_type,
@@ -714,6 +867,11 @@ async def stream_user_message(
 
         parts: list[str] = []
         model_used = ""
+        provider_used = ""
+        routing_profile = "coding" if intent == "coding" else "chat"
+        tok_in_s = 0
+        tok_out_s = 0
+        cost_usd_s = 0.0
         req_model = ""
         latency_ms = 0
         # §6.0.6: derive is_mock strictly from the answering provider, NEVER from toggle
@@ -729,6 +887,8 @@ async def stream_user_message(
         async for chunk in router.route_stream(
             task_type=task_type,
             tier=tier,
+            toolsets=["terminal", "file"] if intent == "coding" else None,
+            goal_text=clean_text,
             prompt=clean_text,
             system_prompt=sys_prompt,
             allow_mock_fallback=True,
@@ -741,6 +901,7 @@ async def stream_user_message(
             if ctype == "token":
                 tok = str(chunk.get("token") or "")
                 model_used = str(chunk.get("model") or model_used)
+                provider_used = str(chunk.get("provider_id") or provider_used)
                 is_mock_reply = bool(is_mock_reply or chunk.get("is_mock"))
                 if is_mock_reply and not prefixed:
                     prefixed = True
@@ -751,13 +912,19 @@ async def stream_user_message(
             elif ctype == "aborted":
                 aborted_reason = str(chunk.get("reason") or "aborted")
                 model_used = str(chunk.get("model") or model_used)
+                provider_used = str(chunk.get("provider_id") or provider_used)
                 latency_ms = int(chunk.get("latency_ms") or 0)
                 is_mock_reply = bool(is_mock_reply or chunk.get("is_mock"))
                 break
             elif ctype == "done":
                 model_used = str(chunk.get("model") or model_used)
+                provider_used = str(chunk.get("provider_id") or provider_used)
+                routing_profile = str(chunk.get("routing_profile") or routing_profile)
                 req_model = str(chunk.get("requested_model") or "")
                 latency_ms = int(chunk.get("latency_ms") or 0)
+                tok_in_s = int(chunk.get("tokens_in") or 0)
+                tok_out_s = int(chunk.get("tokens_out") or 0)
+                cost_usd_s = float(chunk.get("cost_usd") or 0.0)
                 is_mock_reply = bool(is_mock_reply or chunk.get("is_mock"))
                 break
 
@@ -765,12 +932,23 @@ async def stream_user_message(
         if is_mock_reply and not full_content.startswith("محاكاة — "):
             full_content = f"محاكاة — {full_content}"
 
+        turn_stats = _build_turn_stats(
+            tokens_in=tok_in_s,
+            tokens_out=tok_out_s,
+            model_latency_ms=latency_ms,
+            total_latency_ms=latency_ms,
+            model_used=model_used or None,
+            provider_id=provider_used or None,
+            routing_profile=routing_profile,
+            cost_usd=cost_usd_s,
+        )
         asst_seq = user_seq + 1
         card_payload = {
             "mode": thread.mode_key,
             "model_used": model_used or None,
             "requested_model": req_model or None,
             "latency_ms": latency_ms,
+            "stats": turn_stats,
             "is_mock": is_mock_reply,
             "aborted": bool(aborted_reason),
             "abort_reason": aborted_reason,
@@ -831,6 +1009,7 @@ async def stream_user_message(
                 "model_used": model_used or None,
                 "requested_model": req_model or None,
                 "latency_ms": latency_ms,
+                "stats": turn_stats,
                 "is_mock": is_mock_reply,
                 "content": asst_msg.content,
                 "card_payload": card_payload,

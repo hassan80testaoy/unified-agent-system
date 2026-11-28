@@ -36,6 +36,9 @@ class McpServer(Base, TimestampMixin):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     tools_json: Mapped[list[dict[str, Any]]] = mapped_column(PortableJSON, default=list, nullable=False)
     launch_fingerprint: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    oauth_config_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    oauth_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    oauth_auto_refresh: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class McpSessionPermission(Base, TimestampMixin):

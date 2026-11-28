@@ -100,6 +100,8 @@ class SubagentSpawnRequest(BaseModel):
     role: str
     prompt: str = Field(min_length=1)
     use_worktree: bool = False
+    delegate_cli: bool = False
+    preferred_cli: str = "auto"
 
 
 class GoalCreateRequest(BaseModel):
@@ -425,6 +427,13 @@ def run_race_endpoint(
         raise HTTPException(status_code=400, detail={"code": "race_error", "message_ar": str(exc), "message_en": str(exc)}) from exc
 
 
+@router.get("/api/coding/cli-status")
+def coding_cli_status_endpoint(auth: AuthContext = Depends(get_current_auth)):
+    from app.services.coding_cli_delegation import detect_local_coding_clis
+
+    return detect_local_coding_clis()
+
+
 @router.post("/api/threads/{thread_id}/subagents")
 def spawn_subagent_endpoint(
     thread_id: str,
@@ -434,7 +443,20 @@ def spawn_subagent_endpoint(
 ):
     t = _get_thread_or_404(db, auth.workspace.id, thread_id)
     try:
-        res = spawn_subagent(db, t, role=req.role, prompt=req.prompt, use_worktree=req.use_worktree)
+        if req.delegate_cli:
+            from app.services.coding_cli_delegation import delegate_coding_subagent
+
+            res = delegate_coding_subagent(
+                db,
+                t,
+                role=req.role,
+                prompt=req.prompt,
+                delegate_cli=True,
+                preferred_cli=req.preferred_cli,
+                use_worktree=req.use_worktree,
+            )
+        else:
+            res = spawn_subagent(db, t, role=req.role, prompt=req.prompt, use_worktree=req.use_worktree)
         db.commit()
         return res
     except ValueError as exc:

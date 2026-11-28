@@ -86,6 +86,17 @@ from app.models.seo import (
     LocalListing,
     RankSnapshot,
 )
+from app.models.phase7 import (
+    CodeReviewItem,
+    HypnosConfig,
+    HypnosFeedbackEvent,
+    HypnosLoraVersion,
+    ProactiveProposal,
+    RoutingConfigBackup,
+    RoutingProfile,
+    SiteAudit,
+    WakeEventLog,
+)
 
 __all__ = [
     "User",
@@ -158,4 +169,13 @@ __all__ = [
     "TeamPackageImport",
     "AutomationTrigger",
     "TriggerRunLog",
+    "SiteAudit",
+    "WakeEventLog",
+    "ProactiveProposal",
+    "RoutingProfile",
+    "RoutingConfigBackup",
+    "HypnosConfig",
+    "HypnosFeedbackEvent",
+    "HypnosLoraVersion",
+    "CodeReviewItem",
 ]
