@@ -17,4 +17,4 @@ fluxbox >/dev/null 2>&1 &
 x11vnc -display :99 -forever -shared -rfbauth /home/browser/.vnc/passwd -listen 127.0.0.1 -rfbport 5900 -bg -o /tmp/x11vnc.log
 websockify --web=/usr/share/novnc/ 6080 127.0.0.1:5900 >/tmp/novnc.log 2>&1 &
 
-exec uvicorn worker:app --host "${BIND_HOST:-0.0.0.0}" --port "${CONTROL_PORT:-7080}"
+exec uvicorn interactive_worker:app --host "${BIND_HOST:-0.0.0.0}" --port "${CONTROL_PORT:-7080}"

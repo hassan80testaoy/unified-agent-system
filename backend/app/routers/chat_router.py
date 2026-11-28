@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import get_db
 from app.models.v3_harness import ChatMessage, ChatThread
 from app.security.auth import AuthContext, get_current_auth, record_audit, require_roles
+from app.services.browser_worker_manager import probe_browser_worker, resolve_browser_worker_url
 from app.services.chat_agent import (
     cancel_active_stream,
     compact_thread,
@@ -281,3 +284,25 @@ async def thread_events_websocket(websocket: WebSocket, thread_id: str):
             await websocket.receive_text()
     except WebSocketDisconnect:
         await ws_hub.disconnect(key, websocket)
+
+
+@router.get("/api/browser/status")
+def browser_worker_status(auth: AuthContext = Depends(get_current_auth)):
+    return probe_browser_worker(resolve_browser_worker_url())
+
+
+@router.get("/api/browser/screenshots/{session_id}/{filename}")
+def get_browser_screenshot(
+    session_id: str,
+    filename: str,
+    auth: AuthContext = Depends(get_current_auth),
+):
+    safe_sid = Path(session_id).name
+    safe_name = Path(filename).name
+    if safe_sid != session_id or safe_name != filename or ".." in session_id or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid screenshot path")
+    root = (get_settings().artifacts_dir / "browser").resolve()
+    target = (root / safe_sid / safe_name).resolve()
+    if not str(target).startswith(str(root)) or not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    return FileResponse(str(target), media_type="image/png")

@@ -649,16 +649,22 @@ class LLMRouter:
             .all()
             if not (is_prod and (is_local_endpoint(p.api_base) or p.kind == "llm-local"))
         }
-        ordered: list[Provider] = []
+        ordered_real: list[Provider] = []
+        ordered_mock: list[Provider] = []
         for pid in chain:
+            if pid == exclude_provider_id or pid not in all_enabled:
+                continue
+            prov = all_enabled[pid]
+            bucket = ordered_mock if prov.kind == "llm-mock" else ordered_real
+            if prov not in bucket:
+                bucket.append(prov)
+        for pid, prov in all_enabled.items():
             if pid == exclude_provider_id:
                 continue
-            if pid in all_enabled and all_enabled[pid] not in ordered:
-                ordered.append(all_enabled[pid])
-        for pid, prov in all_enabled.items():
-            if pid != exclude_provider_id and prov not in ordered:
-                ordered.append(prov)
-        return ordered
+            bucket = ordered_mock if prov.kind == "llm-mock" else ordered_real
+            if prov not in bucket:
+                bucket.append(prov)
+        return ordered_real + ordered_mock
 
     def route(
         self,

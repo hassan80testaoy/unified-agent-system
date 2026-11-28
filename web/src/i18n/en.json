@@ -212,5 +212,16 @@
     "triggers_title": "Schedule & Event Triggers",
     "mcp_title": "MCP Servers, Session Permissions & Skills",
     "teams_title": "Bot Roster, Channels & Portable Teams"
+  },
+  "phase6": {
+    "browser_online": "Live Browser Online",
+    "browser_offline": "Browser Offline",
+    "llm_ready": "LLM Ready",
+    "proxy_ready": "Proxy Configured",
+    "gmail_ready": "Gmail Connected",
+    "gmail_missing": "Gmail Not Linked",
+    "browser_steps": "Live Browser Steps",
+    "screenshots": "Live Screenshots",
+    "open_full": "Open full size"
   }
 }

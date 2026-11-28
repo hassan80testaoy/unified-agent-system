@@ -59,7 +59,19 @@ export default function ChatHomePage() {
   const [streamModel, setStreamModel] = useState("");
   const [notice, setNotice] = useState("");
   const [mockMode, setMockMode] = useState(false);
-  const [runtimeReady, setRuntimeReady] = useState<{ default_mock_mode: boolean; missing_for_real_backlink?: string[] } | null>(null);
+  const [streamSteps, setStreamSteps] = useState<Array<{ step?: number; tool?: string; url?: string; detail?: string; screenshot_url?: string }>>([]);
+  const [runtimeReady, setRuntimeReady] = useState<{
+    llm_provider: boolean;
+    browser_worker: boolean;
+    browser_worker_error?: string | null;
+    google_account: boolean;
+    residential_proxy: boolean;
+    real_chat_ready: boolean;
+    real_backlink_ready: boolean;
+    default_mock_mode: boolean;
+    missing_keys?: string[];
+    missing_for_real_backlink?: string[];
+  } | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -86,9 +98,18 @@ export default function ChatHomePage() {
   };
 
   const loadRuntimeStatus = async () => {
-    const rs = await apiFetch<{ default_mock_mode: boolean; missing_for_real_backlink?: string[] }>(
-      "/api/system/runtime-status"
-    ).catch(() => null);
+    const rs = await apiFetch<{
+      llm_provider: boolean;
+      browser_worker: boolean;
+      browser_worker_error?: string | null;
+      google_account: boolean;
+      residential_proxy: boolean;
+      real_chat_ready: boolean;
+      real_backlink_ready: boolean;
+      default_mock_mode: boolean;
+      missing_keys?: string[];
+      missing_for_real_backlink?: string[];
+    }>("/api/system/runtime-status").catch(() => null);
     if (rs) {
       setRuntimeReady(rs);
       setMockMode(Boolean(rs.default_mock_mode));
@@ -156,6 +177,7 @@ export default function ChatHomePage() {
     setSending(true);
     setStreamContent("");
     setStreamModel("");
+    setStreamSteps([]);
     setNotice("");
     const controller = new AbortController();
     abortRef.current = controller;
@@ -220,7 +242,9 @@ export default function ChatHomePage() {
             if (!dataLine) continue;
             try {
               const parsed = JSON.parse(dataLine);
-              if (evName === "token" && parsed.token) {
+              if (evName === "progress") {
+                setStreamSteps((prev) => [...prev, parsed]);
+              } else if (evName === "token" && parsed.token) {
                 setStreamContent((prev) => prev + String(parsed.token));
                 if (parsed.model) setStreamModel(String(parsed.model));
               } else if (evName === "done" || evName === "aborted") {
@@ -279,16 +303,16 @@ export default function ChatHomePage() {
   const starters =
     locale === "ar"
       ? [
-          "سجل لي حساب في موقع medium.com بالإيميل name@gmail.com واعمل باك لينك",
+          "افتح جوجل",
+          "دوّر على أحدث تقنيات السيو التقني 2026",
+          "سجّل باك لينك في موقع medium.com بالإيميل real@mydomain.com",
           "شوف إيميلي",
-          "أرخص طيران للقاهرة بكرة",
-          "راقب الروابط وأخبرني بالروابط المفقودة",
         ]
       : [
-          "Register profile on medium.com with name@gmail.com and create a backlink",
+          "Open Google",
+          "Search for Technical SEO best practices 2026",
+          "Register backlink on medium.com with real@mydomain.com",
           "Check my inbox",
-          "Cheapest flights to Cairo tomorrow",
-          "Check links and report missing or downgraded links",
         ];
 
   return (
@@ -426,9 +450,42 @@ export default function ChatHomePage() {
           </div>
         </div>
 
+        {runtimeReady && (
+          <div className="flex flex-wrap items-center gap-1.5 border-b border-borderline bg-canvas/60 px-4 py-1.5 text-[11px]">
+            <span
+              className={`rounded-full border px-2 py-0.5 ${
+                runtimeReady.llm_provider ? "border-success/50 bg-success/10 text-success" : "border-danger/50 bg-danger/10 text-danger"
+              }`}
+            >
+              {t("phase6.llm_ready")}: {runtimeReady.llm_provider ? "OK" : "OFF"}
+            </span>
+            <span
+              className={`rounded-full border px-2 py-0.5 ${
+                runtimeReady.browser_worker ? "border-success/50 bg-success/10 text-success" : "border-danger/50 bg-danger/10 text-danger"
+              }`}
+            >
+              {runtimeReady.browser_worker ? t("phase6.browser_online") : t("phase6.browser_offline")}
+            </span>
+            <span
+              className={`rounded-full border px-2 py-0.5 ${
+                runtimeReady.google_account ? "border-success/50 bg-success/10 text-success" : "border-borderline text-muted"
+              }`}
+            >
+              {runtimeReady.google_account ? t("phase6.gmail_ready") : t("phase6.gmail_missing")}
+            </span>
+            <span
+              className={`rounded-full border px-2 py-0.5 ${
+                runtimeReady.residential_proxy ? "border-success/50 bg-success/10 text-success" : "border-borderline text-muted"
+              }`}
+            >
+              {t("phase6.proxy_ready")}: {runtimeReady.residential_proxy ? "ON" : "OFF"}
+            </span>
+          </div>
+        )}
+
         {mockMode && (
           <div className="border-b border-warning/40 bg-amber-500/10 px-4 py-2 text-xs font-semibold text-warning">
-            وضع محاكاة — لا يتم إنشاء حسابات حقيقية ولا روابط حية
+            وضع محاكاة — لا يتم فتح مواقع حقيقية ولا إنشاء حسابات أو روابط حية
             {runtimeReady?.missing_for_real_backlink && runtimeReady.missing_for_real_backlink.length > 0 && (
               <span className="ms-2 font-normal text-muted">
                 ({runtimeReady.missing_for_real_backlink.join(" · ")})
@@ -480,6 +537,50 @@ export default function ChatHomePage() {
                 </div>
                 <div className="whitespace-pre-wrap leading-relaxed">{m.content}</div>
 
+                {(() => {
+                  const shots = (m.card_payload?.screenshots as string[] | undefined) || [];
+                  const links = (m.card_payload?.links as Array<{ text: string; href: string }> | undefined) || [];
+                  if (shots.length === 0 && links.length === 0) return null;
+                  return (
+                    <div className="mt-2 space-y-2 border-t border-borderline/60 pt-2">
+                      {shots.length > 0 && (
+                        <div>
+                          <div className="mb-1 text-[10px] font-semibold text-muted">{t("phase6.screenshots")}</div>
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                            {shots.map((sc) => (
+                              <a
+                                key={sc}
+                                href={sc}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="group block overflow-hidden rounded-lg border border-borderline bg-surface"
+                                title={t("phase6.open_full")}
+                              >
+                                <img src={sc} alt="Browser step screenshot" className="max-h-48 w-full object-cover object-top" />
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {links.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {links.slice(0, 6).map((lk) => (
+                            <a
+                              key={lk.href}
+                              href={lk.href}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="max-w-[240px] truncate rounded border border-primary/30 bg-primary/5 px-2 py-0.5 text-[10px] text-primary hover:underline"
+                            >
+                              {lk.text || lk.href}
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {m.role === "assistant" && (() => {
                   const mod = m.model_used || (m.card_payload?.model_used as string | undefined);
                   const msRaw = m.latency_ms ?? (m.card_payload?.latency_ms as number | undefined);
@@ -521,6 +622,19 @@ export default function ChatHomePage() {
                 <span className="font-bold uppercase">Agent · {t("phase5.streaming")}</span>
                 {streamModel && <bdi dir="ltr" className="font-mono text-muted">{streamModel}</bdi>}
               </div>
+              {streamSteps.length > 0 && (
+                <div className="space-y-1 rounded-lg border border-borderline bg-surface/80 p-2 text-[11px]">
+                  <div className="font-semibold text-primary">{t("phase6.browser_steps")}</div>
+                  {streamSteps.map((st, idx) => (
+                    <div key={`${st.step ?? idx}`} className="flex flex-col gap-0.5 text-muted">
+                      <span>{st.detail || st.url || st.tool}</span>
+                      {st.screenshot_url && (
+                        <img src={st.screenshot_url} alt="Live step" className="mt-1 max-h-36 rounded border border-borderline object-cover object-top" />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="whitespace-pre-wrap leading-relaxed">{streamContent || "..."}</div>
             </div>
           )}

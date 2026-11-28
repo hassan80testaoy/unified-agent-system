@@ -27,6 +27,7 @@ from app.routers import (
 )
 from app.security.sanitizer import install_log_sanitizer
 from app.models.core import Workspace
+from app.services.browser_worker_manager import ensure_local_browser_worker_started, stop_local_browser_worker
 from app.services.coding_agent import resume_interrupted_threads
 from app.services.llm_router import seed_default_providers
 from app.services.model_catalogue import catalogue_daily_refresh_loop
@@ -53,12 +54,14 @@ async def lifespan(_app: FastAPI):
     refresh_task: asyncio.Task[None] | None = None
     trigger_task: asyncio.Task[None] | None = None
     if not os.environ.get("PYTEST_CURRENT_TEST"):
+        ensure_local_browser_worker_started()
         refresh_task = asyncio.create_task(catalogue_daily_refresh_loop(stop_event))
         trigger_task = asyncio.create_task(trigger_scheduler_loop(stop_event))
     try:
         yield
     finally:
         stop_event.set()
+        stop_local_browser_worker()
         for bg_task in (refresh_task, trigger_task):
             if bg_task is not None:
                 bg_task.cancel()

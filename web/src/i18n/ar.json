@@ -212,5 +212,16 @@
     "triggers_title": "المحفّزات الجدولية والأحداث (Triggers)",
     "mcp_title": "خوادم MCP وصلاحيات الجلسة والمهارات",
     "teams_title": "جهات الاتصال البوتية، القنوات، والفرق"
+  },
+  "phase6": {
+    "browser_online": "المتصفح الحي متصل",
+    "browser_offline": "المتصفح غير متصل",
+    "llm_ready": "الذكاء الاصطناعي جاهز",
+    "proxy_ready": "البروكسي مضبوط",
+    "gmail_ready": "Gmail مربوط",
+    "gmail_missing": "Gmail غير مربوط",
+    "browser_steps": "خطوات المتصفح الحية",
+    "screenshots": "لقطات الشاشة الحيّة",
+    "open_full": "فتح بالحجم الكامل"
   }
 }

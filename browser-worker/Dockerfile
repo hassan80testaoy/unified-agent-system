@@ -18,6 +18,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY worker.py /app/worker.py
+COPY interactive_worker.py /app/interactive_worker.py
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh && \
     mkdir -p /home/browser/profiles /home/browser/.vnc && \

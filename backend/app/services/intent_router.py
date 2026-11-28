@@ -36,6 +36,10 @@ _BACKLINK_KEYWORDS = (
     "سجل لي حساب في موقع",
     "سجل حساب في موقع",
     "سجّل لي حساب",
+    "سجّل باك لينك",
+    "سجل باك لينك",
+    "اعمل باك لينك",
+    "حط باك لينك",
     "سجل في موقع",
     "بروفايل لينك",
     "profile link",
@@ -96,6 +100,73 @@ _CODING_KEYWORDS = (
     "coding",
 )
 
+_BROWSER_KEYWORDS = (
+    "افتح",
+    "إفتح",
+    "خش على",
+    "ادخل على",
+    "ادخل موقع",
+    "روح على",
+    "تصفح",
+    "شوف موقع",
+    "زور موقع",
+    "زيارة موقع",
+    "دوّر على",
+    "دور على",
+    "ابحث عن",
+    "ابحث في",
+    "بحث في جوجل",
+    "سجّل في",
+    "سجل في",
+    "سجل حساب",
+    "اعمل حساب",
+    "سكرين شوت",
+    "لقطة شاشة",
+    "جوجل",
+    "قوقل",
+    "open ",
+    "go to ",
+    "visit ",
+    "browse ",
+    "navigate to",
+    "search for",
+    "search on",
+    "look up",
+    "google",
+    "screenshot",
+    "sign up on",
+    "register on",
+)
+
+_SEARCH_PREFIXES = (
+    "دوّر على",
+    "دور على",
+    "ابحث عن",
+    "بحث عن",
+    "ابحث في جوجل عن",
+    "بحث في جوجل عن",
+    "search for",
+    "search ",
+    "look up",
+)
+
+_SITE_NAME_HINTS = {
+    "جوجل": "google",
+    "قوقل": "google",
+    "google": "google",
+    "ويكيبيديا": "wikipedia",
+    "wikipedia": "wikipedia",
+    "يوتيوب": "youtube",
+    "youtube": "youtube",
+    "جيت هاب": "github",
+    "github": "github",
+    "بينج": "bing",
+    "bing": "bing",
+    "duckduckgo": "duckduckgo",
+}
+
+_FULL_URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.I)
+
 
 def classify_intent(text: str) -> dict[str, Any]:
     """Classify natural-language Arabic/Egyptian/English user request cleanly."""
@@ -106,6 +177,7 @@ def classify_intent(text: str) -> dict[str, Any]:
     email = emails[0] if emails else None
     email_domain = email.split("@", 1)[1].lower() if email and "@" in email else None
 
+    full_urls = _FULL_URL_RE.findall(clean)
     domains: list[str] = []
     for match in _URL_OR_DOMAIN_RE.findall(clean):
         cand = match.lower()
@@ -117,16 +189,32 @@ def classify_intent(text: str) -> dict[str, Any]:
     entities: dict[str, Any] = {}
     if email:
         entities["email"] = email
+    if full_urls:
+        entities["url"] = full_urls[0]
     if domains:
         entities["domain"] = domains[0]
         entities["domains"] = domains
+
+    # Extract search query if prompt looks like a web search request
+    for sp in _SEARCH_PREFIXES:
+        idx = lower.find(sp)
+        if idx != -1:
+            q_tail = clean[idx + len(sp) :].strip(" :\"'؟?")
+            if q_tail:
+                entities["query"] = q_tail
+            break
+
+    for alias, hint in _SITE_NAME_HINTS.items():
+        if alias in lower:
+            entities.setdefault("site_hint", hint)
+            break
 
     # 1. Flights (explicitly NEVER mapped to backlink)
     for kw in _FLIGHTS_KEYWORDS:
         if kw in lower:
             return {"intent": "flights", "confidence": 0.96, "matched_rule": kw, "entities": entities}
 
-    # 2. Explicit Backlink / site registration (checked before generic 'mail' when signup+backlink share a sentence)
+    # 2. Explicit Backlink / site registration (checked before generic browser when backlink is requested)
     for kw in _BACKLINK_KEYWORDS:
         if kw in lower:
             return {"intent": "backlink", "confidence": 0.95, "matched_rule": kw, "entities": entities}
@@ -151,5 +239,15 @@ def classify_intent(text: str) -> dict[str, Any]:
         if kw in lower:
             return {"intent": "coding", "confidence": 0.92, "matched_rule": kw, "entities": entities}
 
-    # 7. General chat
+    # 7. General Browser Agent (any request needing live web open/search/click/signup)
+    for kw in _BROWSER_KEYWORDS:
+        if kw in lower:
+            if kw in ("جوجل", "قوقل", "google") and "site_hint" not in entities:
+                entities["site_hint"] = "google"
+            return {"intent": "browser", "confidence": 0.92, "matched_rule": kw, "entities": entities}
+
+    if full_urls or domains:
+        return {"intent": "browser", "confidence": 0.88, "matched_rule": "explicit_url_or_domain", "entities": entities}
+
+    # 8. General chat
     return {"intent": "general", "confidence": 0.75, "matched_rule": "fallback_general", "entities": entities}

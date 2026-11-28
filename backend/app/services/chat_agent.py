@@ -16,12 +16,13 @@ from app.models.providers import LlmCall
 from app.models.v3_harness import ChatMessage, ChatThread, ModePreset
 from app.security.crypto import decrypt_secret
 from app.security.sanitizer import scrub_text
+from app.services.browser_agent import run_general_browser_agent
 from app.services.browser_loop import run_flagship_backlink_loop
 from app.services.events import ws_hub
 from app.services.intent_router import classify_intent
 from app.services.llm_router import LLMRouter
 from app.services.modes import seed_default_modes
-from app.services.runtime_checks import validate_real_email
+from app.services.runtime_checks import get_runtime_readiness, validate_real_email
 from app.services.session_log import append_turn, get_session_log_path, rewind_log
 
 
@@ -256,13 +257,39 @@ async def process_user_message(
                     mock_mode=bool(mock_mode),
                     simulate_captcha=simulate_captcha,
                     simulate_2fa=simulate_2fa,
+                    thread_id=thread.id,
                 )
-                loop_res.setdefault("mock_mode", bool(mock_mode))
                 reply_payload = {
                     "content": loop_res["report_ar"],
                     "card_type": loop_res.get("card_type"),
                     "card_payload": loop_res,
                 }
+    elif intent == "browser":
+        b_res = await run_general_browser_agent(
+            db,
+            thread_id=thread.id,
+            workspace_id=thread.workspace_id,
+            user_id=user_id,
+            prompt=clean_text,
+            entities=entities,
+            mock_mode=bool(mock_mode),
+        )
+        reply_payload = {
+            "content": b_res["report_ar"],
+            "card_type": b_res.get("card_type"),
+            "card_payload": {
+                "status": b_res.get("status"),
+                "current_url": b_res.get("current_url"),
+                "page_title": b_res.get("page_title"),
+                "screenshots": b_res.get("screenshots") or [],
+                "links": b_res.get("links") or [],
+                "stages": b_res.get("stages") or [],
+                "runtime_status": b_res.get("runtime_status"),
+                "model_used": b_res.get("model_used"),
+                "latency_ms": b_res.get("latency_ms"),
+                "is_mock": bool(b_res.get("is_mock", False)),
+            },
+        }
     elif intent == "coding":
         router = LLMRouter(db, thread.workspace_id)
         try:
@@ -274,25 +301,31 @@ async def process_user_message(
                 use_cache=False,
             )
             ans = res.get("raw_text") or ""
+            is_mock_coding = bool(res.get("is_mock", False))
         except Exception:
             ans = ""
+            is_mock_coding = False
         reply_payload = {
             "content": (
                 "💻 **تم توجيه طلبك إلى وكيل البرمجة العام (Coding Agent):**\n"
                 + (ans or "يمكنك فتح صفحة **وكيل البرمجة (`/coding`)** لإنشاء الخطة ومعاينة التصميم والتشغيل في المتصفح الحي.")
             ),
             "card_type": None,
-            "card_payload": {"mode": thread.mode_key, "mock_mode": bool(mock_mode), "coding_route": "/coding"},
+            "card_payload": {"mode": thread.mode_key, "is_mock": is_mock_coding, "coding_route": "/coding"},
         }
     else:
         router = LLMRouter(db, thread.workspace_id)
         sys_prompt = mode_row.system_prompt if mode_row else "You are a helpful Arabic-first assistant."
+        readiness = get_runtime_readiness(db, thread.workspace_id)
+        if readiness.get("browser_worker"):
+            sys_prompt += "\nThe platform has a live Playwright browser online; never claim you cannot browse the web."
         if thread.compacted_summary:
             sys_prompt += f"\n\n[Previous compacted context]:\n{thread.compacted_summary}"
         t_start = time.monotonic()
         model_used = None
         latency_ms = None
-        is_mock_reply = bool(mock_mode)
+        # §6.0.6: Never pre-stamp mock from toggle before checking actual router output
+        is_mock_reply = False
         try:
             res = router.route(
                 task_type="chat",
@@ -304,12 +337,14 @@ async def process_user_message(
             answer = res.get("raw_text") or "تم استلام رسالتك."
             model_used = res.get("model")
             latency_ms = res.get("latency_ms")
-            is_mock_reply = bool(is_mock_reply or res.get("is_mock"))
+            is_mock_reply = bool(res.get("is_mock"))
         except Exception:
             answer = "تم استلام رسالتك. يرجى ضبط مزود ذكاء اصطناعي نشط في الإعدادات للحصول على إجابة من النموذج."
             latency_ms = int((time.monotonic() - t_start) * 1000)
         if is_mock_reply and not answer.startswith("محاكاة — "):
             answer = f"محاكاة — {answer}"
+        elif not is_mock_reply and answer.startswith("محاكاة — "):
+            answer = answer[len("محاكاة — ") :].lstrip()
         reply_payload = {
             "content": answer,
             "card_type": None,
@@ -502,12 +537,17 @@ async def stream_user_message(
     cancel_ev = asyncio.Event()
     _ACTIVE_STREAMS[thread.id] = cancel_ev
     try:
-        # Specialized deterministic workflows execute via existing handlers and emit chunked + final metadata
-        if intent in {"flights", "agent-mail", "link_monitor", "reports", "backlink"}:
+        # Specialized workflows execute via handlers and emit live progress + chunked + final metadata
+        if intent in {"flights", "agent-mail", "link_monitor", "reports", "backlink", "browser"}:
             t0 = time.monotonic()
             model_used: str | None = None
             card_type: str | None = None
             card_payload: dict[str, Any] | None = None
+            progress_q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+            async def _push_progress(step_info: dict[str, Any]) -> None:
+                await progress_q.put(step_info)
+
             if intent == "flights":
                 r = _handle_flights(db, thread.workspace_id, clean_text)
             elif intent == "agent-mail":
@@ -516,6 +556,49 @@ async def stream_user_message(
                 r = _handle_link_monitor(db, thread.workspace_id)
             elif intent == "reports":
                 r = _handle_reports(db, thread.workspace_id)
+            elif intent == "browser":
+                async def _run_browser() -> dict[str, Any]:
+                    try:
+                        return await run_general_browser_agent(
+                            db,
+                            thread_id=thread.id,
+                            workspace_id=thread.workspace_id,
+                            user_id=user_id,
+                            prompt=clean_text,
+                            entities=entities,
+                            mock_mode=bool(mock_mode),
+                            on_progress=_push_progress,
+                            cancel_event=cancel_ev,
+                        )
+                    finally:
+                        await progress_q.put(None)
+
+                task = asyncio.create_task(_run_browser())
+                while True:
+                    if disconnected_check and await disconnected_check():
+                        cancel_ev.set()
+                    item = await progress_q.get()
+                    if item is None:
+                        break
+                    yield {"event": "progress", "data": item}
+                b_res = await task
+                model_used = b_res.get("model_used")
+                r = {
+                    "content": b_res["report_ar"],
+                    "card_type": b_res.get("card_type"),
+                    "card_payload": {
+                        "status": b_res.get("status"),
+                        "current_url": b_res.get("current_url"),
+                        "page_title": b_res.get("page_title"),
+                        "screenshots": b_res.get("screenshots") or [],
+                        "links": b_res.get("links") or [],
+                        "stages": b_res.get("stages") or [],
+                        "runtime_status": b_res.get("runtime_status"),
+                        "model_used": model_used,
+                        "latency_ms": b_res.get("latency_ms"),
+                        "is_mock": bool(b_res.get("is_mock", False)),
+                    },
+                }
             else:
                 domain = entities.get("domain")
                 email = entities.get("email")
@@ -531,7 +614,7 @@ async def stream_user_message(
                     r = {
                         "content": "🔗 **وكيل الباك لينك جاهز (Flagship Loop):**\nيرجى تحديد اسم الموقع المستهدف والبريد الإلكتروني الحقيقي.",
                         "card_type": None,
-                        "card_payload": {"need": ["domain", "email"], "mock_mode": bool(mock_mode)},
+                        "card_payload": {"need": ["domain", "email"], "is_mock": False},
                     }
                 else:
                     ok_email, email_err = validate_real_email(email)
@@ -539,20 +622,33 @@ async def stream_user_message(
                         r = {
                             "content": email_err or "يرجى إدخال بريد إلكتروني حقيقي للتسجيل.",
                             "card_type": None,
-                            "card_payload": {"status": "invalid_email", "mock_mode": bool(mock_mode)},
+                            "card_payload": {"status": "invalid_email", "is_mock": False},
                         }
                     else:
-                        loop_res = await run_flagship_backlink_loop(
-                            db,
-                            workspace_id=thread.workspace_id,
-                            user_id=user_id,
-                            domain=domain,
-                            email=email,
-                            mock_mode=bool(mock_mode),
-                            simulate_captcha=simulate_captcha,
-                            simulate_2fa=simulate_2fa,
-                        )
-                        loop_res.setdefault("mock_mode", bool(mock_mode))
+                        async def _run_bl() -> dict[str, Any]:
+                            try:
+                                return await run_flagship_backlink_loop(
+                                    db,
+                                    workspace_id=thread.workspace_id,
+                                    user_id=user_id,
+                                    domain=domain,
+                                    email=email,
+                                    mock_mode=bool(mock_mode),
+                                    simulate_captcha=simulate_captcha,
+                                    simulate_2fa=simulate_2fa,
+                                    thread_id=thread.id,
+                                    on_progress=_push_progress,
+                                )
+                            finally:
+                                await progress_q.put(None)
+
+                        task = asyncio.create_task(_run_bl())
+                        while True:
+                            item = await progress_q.get()
+                            if item is None:
+                                break
+                            yield {"event": "progress", "data": item}
+                        loop_res = await task
                         r = {"content": loop_res["report_ar"], "card_type": loop_res.get("card_type"), "card_payload": loop_res}
 
             latency_ms = int((time.monotonic() - t0) * 1000)
@@ -562,7 +658,8 @@ async def stream_user_message(
             card_payload.setdefault("latency_ms", latency_ms)
             if model_used:
                 card_payload["model_used"] = model_used
-            yield {"event": "token", "data": {"token": full_text, "model": model_used or "", "is_mock": bool(card_payload.get("is_mock", mock_mode))}}
+            actual_is_mock = bool(card_payload.get("is_mock", False))
+            yield {"event": "token", "data": {"token": full_text, "model": model_used or "", "is_mock": actual_is_mock}}
 
             asst_seq = user_seq + 1
             asst_msg = ChatMessage(
@@ -586,7 +683,8 @@ async def stream_user_message(
                     "seq": asst_seq,
                     "model_used": model_used,
                     "latency_ms": latency_ms,
-                    "is_mock": bool(card_payload.get("is_mock", mock_mode)),
+                    "is_mock": actual_is_mock,
+                    "content": asst_msg.content,
                     "card_type": card_type,
                     "card_payload": card_payload,
                 },
@@ -606,6 +704,9 @@ async def stream_user_message(
             tier = "mid"
         else:
             sys_prompt = mode_row.system_prompt if mode_row else "You are a helpful Arabic-first assistant."
+            readiness = get_runtime_readiness(db, thread.workspace_id)
+            if readiness.get("browser_worker"):
+                sys_prompt += "\nThe platform has a live Playwright browser online; never claim you cannot browse the web."
             if thread.compacted_summary:
                 sys_prompt += f"\n\n[Previous compacted context]:\n{thread.compacted_summary}"
             task_type = "chat"
@@ -615,7 +716,8 @@ async def stream_user_message(
         model_used = ""
         req_model = ""
         latency_ms = 0
-        is_mock_reply = bool(mock_mode)
+        # §6.0.6: derive is_mock strictly from the answering provider, NEVER from toggle
+        is_mock_reply = False
         aborted_reason: str | None = None
         prefixed = False
         prefix_text = "💡 **وكيل البرمجة العام (`/coding`):**\n" if intent == "coding" else ""

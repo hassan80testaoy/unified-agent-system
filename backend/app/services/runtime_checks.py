@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import get_env_secret_by_ref, get_settings
 from app.models.google_account import GoogleAccount
 from app.models.providers import ApiKey, Provider
+from app.services.browser_worker_manager import probe_browser_worker, resolve_browser_worker_url
 
 _EMAIL_FMT_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 _PLACEHOLDER_LOCALS = {
@@ -92,13 +93,16 @@ def get_runtime_readiness(db: Session, workspace_id: str) -> dict[str, Any]:
             continue
         if (
             p.kind == "llm-local"
+            or (not settings.is_production and is_local_endpoint(p.api_base))
             or p.id in key_providers
             or bool(get_env_secret_by_ref(p.auth_ref))
         ):
             has_real_llm = True
             break
 
-    has_browser_worker = bool((settings.browser_worker_url or "").strip())
+    worker_url = resolve_browser_worker_url()
+    worker_probe = probe_browser_worker(worker_url) if worker_url else {"ok": False, "url": "", "error": "browser_worker_url_not_set"}
+    has_browser_worker = bool(worker_probe.get("ok"))
     has_google_account = (
         db.query(GoogleAccount)
         .filter(GoogleAccount.workspace_id == workspace_id, GoogleAccount.status == "active")
@@ -114,7 +118,8 @@ def get_runtime_readiness(db: Session, workspace_id: str) -> dict[str, Any]:
         missing_backlink_ar.append("مفتاح مزود LLM نشط (من الإعدادات أو .env)")
     if not has_browser_worker:
         missing_keys.append("browser_worker")
-        missing_backlink_ar.append("خادم المتصفح Playwright (`BROWSER_WORKER_URL`)")
+        err_hint = f" ({worker_probe.get('error')})" if worker_probe.get("error") else ""
+        missing_backlink_ar.append(f"خادم المتصفح Playwright (`BROWSER_WORKER_URL`){err_hint}")
     if not has_google_account:
         missing_keys.append("google_account")
         missing_backlink_ar.append("حساب Google مربوط ونشط في الخزنة (§2.3)")
@@ -128,6 +133,8 @@ def get_runtime_readiness(db: Session, workspace_id: str) -> dict[str, Any]:
     return {
         "llm_provider": has_real_llm,
         "browser_worker": has_browser_worker,
+        "browser_worker_url": worker_url,
+        "browser_worker_error": worker_probe.get("error"),
         "google_account": has_google_account,
         "residential_proxy": has_residential_proxy,
         "real_chat_ready": real_chat_ready,
