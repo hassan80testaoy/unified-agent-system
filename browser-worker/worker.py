@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -32,6 +34,7 @@ class OpenSiteRequest(BaseModel):
     profile_id: str = Field(default="default", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     url: str
     headless: bool = False
+    proxy: str | None = None
 
 
 class StepAction(BaseModel):
@@ -46,19 +49,53 @@ class ExecuteStepsRequest(BaseModel):
     profile_id: str = Field(default="default", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     url: str
     steps: list[StepAction] = Field(default_factory=list)
+    proxy: str | None = None
 
 
-def _detect_challenge_from_html(html: str) -> dict[str, str] | None:
-    lower = html.lower()
-    if "cf-turnstile" in lower or "challenges.cloudflare.com" in lower:
-        return {"challenge_type": "turnstile", "reason": "cloudflare"}
-    if "g-recaptcha" in lower or "recaptcha/api2" in lower:
-        return {"challenge_type": "recaptcha", "reason": "captcha_manual"}
-    if "h-captcha" in lower or "hcaptcha.com" in lower:
-        return {"challenge_type": "hcaptcha", "reason": "captcha_manual"}
-    if "type=\"tel\"" in lower or "verify your phone" in lower or "phone number" in lower:
-        return {"challenge_type": "phone_verify", "reason": "phone_verify"}
+def _extract_site_key(html: str) -> str | None:
+    if not html:
+        return None
+    m = re.search(r'data-sitekey=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    m_qs = re.search(r'[?&](?:sitekey|k)=([A-Za-z0-9_-]{10,128})', html, re.IGNORECASE)
+    if m_qs:
+        return m_qs.group(1).strip()
     return None
+
+
+def _parse_proxy(proxy_url: str | None) -> dict[str, str] | None:
+    """Parse HTTP/SOCKS proxy URL into Playwright proxy dict without logging credentials."""
+    raw = (proxy_url or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.hostname:
+        return {"server": raw}
+    port_part = f":{parsed.port}" if parsed.port else ""
+    cfg: dict[str, str] = {"server": f"{parsed.scheme}://{parsed.hostname}{port_part}"}
+    if parsed.username:
+        cfg["username"] = parsed.username
+    if parsed.password:
+        cfg["password"] = parsed.password
+    return cfg
+
+
+def _detect_challenge_from_html(html: str) -> dict[str, Any] | None:
+    lower = html.lower()
+    site_key = _extract_site_key(html)
+    res: dict[str, Any] | None = None
+    if "cf-turnstile" in lower or "challenges.cloudflare.com" in lower:
+        res = {"challenge_type": "turnstile", "reason": "cloudflare"}
+    elif "g-recaptcha" in lower or "recaptcha/api2" in lower:
+        res = {"challenge_type": "recaptcha", "reason": "captcha_manual"}
+    elif "h-captcha" in lower or "hcaptcha.com" in lower:
+        res = {"challenge_type": "hcaptcha", "reason": "captcha_manual"}
+    elif "type=\"tel\"" in lower or "verify your phone" in lower or "phone number" in lower:
+        res = {"challenge_type": "phone_verify", "reason": "phone_verify"}
+    if res and site_key:
+        res["site_key"] = site_key
+    return res
 
 
 @app.get("/health")
@@ -83,14 +120,19 @@ async def run_steps(req: ExecuteStepsRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Invalid profile_id")
     profile_dir.mkdir(parents=True, exist_ok=True)
 
+    proxy_cfg = _parse_proxy(req.proxy or os.environ.get("BROWSER_PROXY_URL"))
+    launch_kwargs: dict[str, Any] = {
+        "user_data_dir": str(profile_dir),
+        "headless": os.environ.get("BROWSER_HEADLESS", "false").lower() == "true",
+        "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+    }
+    if proxy_cfg:
+        launch_kwargs["proxy"] = proxy_cfg
+
     recorded_steps: list[dict[str, Any]] = []
     async with _WRITE_LEASE:
         async with async_playwright() as p:
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir=str(profile_dir),
-                headless=os.environ.get("BROWSER_HEADLESS", "false").lower() == "true",
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
-            )
+            context = await p.chromium.launch_persistent_context(**launch_kwargs)
             page = context.pages[0] if context.pages else await context.new_page()
             try:
                 await page.goto(req.url, wait_until="domcontentloaded", timeout=30000)

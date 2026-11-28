@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
 from app.agents.base import AgentContext, KillSwitchTriggeredError
-from app.captcha.solver import CaptchaChallenge
+from app.captcha.solver import CaptchaChallenge, dispatch_solve
 from app.captcha.solvers.manual import pause_for_manual_captcha
 from app.config import get_settings
 from app.models.agents import RunItem
@@ -27,11 +27,13 @@ from app.models.backlinks import (
     BlStep,
     BlTarget,
 )
+from app.models.captcha import CaptchaAttempt
 from app.models.google_account import GoogleAccount
 from app.models.mailboxes import Mailbox
 from app.security.crypto import decrypt_secret
 from app.services.google_account import ask_user_for_verification_code
 from app.services.mailbox import alias_for, fetch_and_find_verification_imap
+from app.services.session_replay import replay_backlink_session, save_backlink_session
 from app.services.vault import create_server_generated_site_password
 
 DEFAULT_HOMEPAGE_ANCHORS = [
@@ -384,6 +386,21 @@ class BacklinkAgent:
                 db.add(account)
                 db.flush()
 
+                # Check prior Session Replay before executing steps
+                replay_info = replay_backlink_session(db, workspace_id=ws, domain=site.domain)
+                if replay_info["found"]:
+                    await ctx.emit(
+                        "info",
+                        "session_replayed",
+                        f"إعادة تشغيل جلسة {site.domain} (v{replay_info['version']}): توفير {replay_info['matched_steps']} خطوة / {replay_info['saved_llm_calls']} استدعاء LLM.",
+                        {
+                            "domain": site.domain,
+                            "version": replay_info["version"],
+                            "saved_steps": replay_info["matched_steps"],
+                            "saved_llm_calls": replay_info["saved_llm_calls"],
+                        },
+                    )
+
                 # Record steps into bl_steps (NEVER raw secret!)
                 steps_to_record = [
                     ("goto", None, None, None, None, "signup_url"),
@@ -393,6 +410,7 @@ class BacklinkAgent:
                     ("submit", "button[type='submit']", "submit-btn", "btn-primary", None, None),
                 ]
                 now_ts = datetime.now(timezone.utc).isoformat()
+                session_steps_payload: list[dict[str, Any]] = []
                 for s_idx, (act, sel, el_id, el_cls, el_txt, v_key) in enumerate(steps_to_record, start=1):
                     db.add(
                         BlStep(
@@ -409,10 +427,30 @@ class BacklinkAgent:
                             ts=now_ts,
                         )
                     )
+                    session_steps_payload.append(
+                        {
+                            "n": s_idx,
+                            "action": act,
+                            "selector_css": sel,
+                            "el_id": el_id,
+                            "el_class": el_cls,
+                            "el_text": el_txt,
+                            "value_key": v_key,
+                            "ok": 1,
+                        }
+                    )
+                save_backlink_session(
+                    db,
+                    workspace_id=ws,
+                    domain=site.domain,
+                    steps=session_steps_payload,
+                    site_id=site.id,
+                )
                 db.flush()
 
-                # 4. Captcha Plugin Check (ManualSolver only; no automated bypass/token injection)
+                # 4. Captcha Plugin Check (generic dispatch through CaptchaSolver interface)
                 solver = ctx.captcha_solver
+                proxy_val = str(task_input.get("proxy") or "").strip() or None
                 challenge: CaptchaChallenge | None = None
                 if mock_mode:
                     if site.domain in simulate_captcha_sites:
@@ -420,20 +458,25 @@ class BacklinkAgent:
                             {
                                 "run_id": ctx.run.id,
                                 "site": site.domain,
-                                "challenge_type": "recaptcha",
+                                "challenge_type": str(task_input.get("simulate_challenge_type") or "recaptcha"),
                                 "page_url": site.signup_url or f"https://{site.domain}",
+                                "site_key": task_input.get("simulate_site_key"),
+                                "proxy": proxy_val,
                             }
                         )
                 elif get_settings().browser_worker_url:
+                    bw_payload: dict[str, Any] = {
+                        "run_id": ctx.run.id,
+                        "profile_id": f"google_{google_acct.id}" if google_acct else "default",
+                        "url": site.signup_url or f"https://{site.domain}",
+                        "steps": [],
+                    }
+                    if proxy_val:
+                        bw_payload["proxy"] = proxy_val
                     async with httpx.AsyncClient(timeout=45.0) as client:
                         resp = await client.post(
                             f"{get_settings().browser_worker_url.rstrip('/')}/sessions/run-steps",
-                            json={
-                                "run_id": ctx.run.id,
-                                "profile_id": f"google_{google_acct.id}" if google_acct else "default",
-                                "url": site.signup_url or f"https://{site.domain}",
-                                "steps": [],
-                            },
+                            json=bw_payload,
                         )
                         if resp.status_code == 200:
                             bw_data = resp.json()
@@ -445,29 +488,61 @@ class BacklinkAgent:
                                         "site": site.domain,
                                         "challenge_type": ch.get("challenge_type", "recaptcha"),
                                         "page_url": bw_data.get("current_url", site.signup_url or ""),
+                                        "site_key": ch.get("site_key"),
                                         "blocked_reason": ch.get("reason", "captcha_manual"),
+                                        "proxy": proxy_val,
                                     }
                                 )
 
                 if challenge is not None:
-                    cap_res = await pause_for_manual_captcha(
-                        db,
-                        workspace_id=ws,
-                        user_id=ctx.user_id,
-                        run=ctx.run,
-                        challenge=challenge,
-                        timeout_sec=int(task_input.get("captcha_timeout_sec") or get_settings().captcha_manual_timeout_sec),
-                    )
-                    if cap_res.status != "passed":
-                        site.status = "needs_captcha_manual" if cap_res.status != "phone_verify_blocked" else "blocked"
-                        site.blocked_reason = cap_res.blocked_reason
-                        run_item.status = site.status
-                        run_item.result = {"blocked_reason": cap_res.blocked_reason}
-                        counts["needs_manual"] += 1
-                        counts["processed"] += 1
-                        ctx.run.progress_done = idx
+                    if not challenge.proxy and proxy_val:
+                        challenge.proxy = proxy_val
+                    cap_res = await dispatch_solve(solver, challenge)
+                    if cap_res.status == "passed":
+                        db.add(
+                            CaptchaAttempt(
+                                workspace_id=ws,
+                                run_id=ctx.run.id,
+                                site=site.domain,
+                                challenge_type=challenge.challenge_type,
+                                method=cap_res.method or "plugin",
+                                proxy_type="proxy" if proxy_val else "direct",
+                                duration_ms=cap_res.duration_ms,
+                                cost_usd=cap_res.cost_usd,
+                                result="passed",
+                                blocked_reason=None,
+                            )
+                        )
                         db.commit()
-                        continue
+                        await ctx.emit(
+                            "info",
+                            "captcha_solved",
+                            f"تم التعامل مع التحدي للموقع {site.domain} عبر {cap_res.method}.",
+                            {"site": site.domain, "method": cap_res.method},
+                        )
+                    else:
+                        if cap_res.status in {"awaiting_captcha_manual", "fallback_manual", "phone_verify_blocked"}:
+                            cap_res = await pause_for_manual_captcha(
+                                db,
+                                workspace_id=ws,
+                                user_id=ctx.user_id,
+                                run=ctx.run,
+                                challenge=challenge,
+                                timeout_sec=int(
+                                    task_input.get("captcha_timeout_sec")
+                                    or get_settings().captcha_manual_timeout_sec
+                                ),
+                            )
+                        if cap_res.status != "passed":
+                            site.status = "needs_captcha_manual" if cap_res.status != "phone_verify_blocked" else "blocked"
+                            site.blocked_reason = cap_res.blocked_reason
+                            run_item.status = site.status
+                            run_item.result = {"blocked_reason": cap_res.blocked_reason}
+                            counts["needs_manual"] += 1
+                            counts["processed"] += 1
+                            ctx.run.progress_done = idx
+                            db.commit()
+                            continue
 
                 # 5. Google 2FA / Verification Code Ask Flow if requested
                 if mock_mode and site.domain in simulate_2fa_sites:

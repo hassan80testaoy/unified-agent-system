@@ -11,11 +11,16 @@ Design rules:
 from __future__ import annotations
 
 import importlib
+import inspect
+import logging
+import os
 import pkgutil
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, runtime_checkable
 
 from app.config import get_settings, load_yaml_config
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,6 +33,7 @@ class CaptchaChallenge:
     blocked_reason: str = "captcha_manual"
     screenshot_path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    proxy: str | None = None
 
 
 @dataclass
@@ -74,11 +80,34 @@ def discover_solvers() -> dict[str, type[CaptchaSolver]]:
 
 
 def get_configured_solver_name() -> str:
+    """Resolve active solver plugin with explicit precedence:
+    1) Live CAPTCHA_SOLVER env var
+    2) providers.yaml active captcha entry
+    3) Settings.captcha_solver (from .env) when non-default
+    4) providers.example.yaml active captcha entry
+    5) Default 'manual'
+    """
+    env_solver = os.environ.get("CAPTCHA_SOLVER", "").strip()
+    if env_solver:
+        return env_solver
+
+    for cfg_name in ("providers.yaml",):
+        providers_cfg = load_yaml_config(cfg_name)
+        for entry in providers_cfg.get("providers", []):
+            if entry.get("kind") == "captcha" and entry.get("enabled", True):
+                if entry.get("solver"):
+                    return str(entry.get("solver"))
+
     settings = get_settings()
-    providers_cfg = load_yaml_config("providers.example.yaml")
-    for entry in providers_cfg.get("providers", []):
+    if settings.captcha_solver and settings.captcha_solver.strip() != "manual":
+        return settings.captcha_solver.strip()
+
+    example_cfg = load_yaml_config("providers.example.yaml")
+    for entry in example_cfg.get("providers", []):
         if entry.get("kind") == "captcha" and entry.get("enabled", True):
-            return str(entry.get("solver") or settings.captcha_solver or "manual")
+            if entry.get("solver"):
+                return str(entry.get("solver"))
+
     return settings.captcha_solver or "manual"
 
 
@@ -89,3 +118,27 @@ def get_captcha_solver(name: str | None = None) -> CaptchaSolver:
         selected = "manual"
     cls = _SOLVER_REGISTRY[selected]
     return cls()
+
+
+async def dispatch_solve(solver: CaptchaSolver, challenge: CaptchaChallenge) -> CaptchaResult:
+    """Invoke any registered CaptchaSolver (sync or async) with safe fallback on exception."""
+    try:
+        res = solver.solve(challenge)
+        if inspect.isawaitable(res):
+            res = await res
+        if isinstance(res, CaptchaResult):
+            return res
+        return CaptchaResult(
+            status="fallback_manual",
+            method=getattr(solver, "name", type(solver).__name__),
+            blocked_reason="invalid_solver_result",
+            cost_usd=0.0,
+        )
+    except Exception as exc:
+        logger.warning("CAPTCHA solver plugin error (%s): %s", type(solver).__name__, type(exc).__name__)
+        return CaptchaResult(
+            status="fallback_manual",
+            method=getattr(solver, "name", type(solver).__name__),
+            blocked_reason=f"solver_error:{type(exc).__name__}",
+            cost_usd=0.0,
+        )

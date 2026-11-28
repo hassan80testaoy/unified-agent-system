@@ -16,6 +16,7 @@ import {
   LogOut,
   Mail,
   Menu,
+  MessageSquare,
   Moon,
   OctagonAlert,
   Play,
@@ -94,7 +95,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   const navItems = [
-    { href: "/", label: t("nav.dashboard"), icon: LayoutDashboard },
+    { href: "/", label: t("nav.chat"), icon: MessageSquare },
+    { href: "/dashboard", label: t("nav.dashboard"), icon: LayoutDashboard },
     { href: "/agents", label: t("nav.agents"), icon: Bot },
     { href: "/tasks/new", label: t("nav.new_task"), icon: PlusCircle },
     { href: "/runs", label: t("nav.runs"), icon: Activity },

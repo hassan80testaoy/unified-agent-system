@@ -1,0 +1,115 @@
+# providers-v3.example.yaml — مثال لملف مزودين (V3)
+# انسخ ده لـ providers.yaml واملأ المفاتيح من Settings UI، مش من الشات.
+# لا تحط مفتاح حقيقي في ملف مثال، ولا ترفعه على git.
+# طرق الاتصال التلاتة (Zadloop-style): signin (خطة موجودة، محلي فقط)
+# / api_key / custom_endpoint (أي OpenAI-compatible endpoint).
+
+providers:
+  # --- مجاني / رخيص (ابدأ بدول) ---
+  - id: groq-free
+    kind: llm
+    connect: api_key
+    api_base: https://api.groq.com/openai/v1
+    auth: env:GROQ_API_KEY
+    models:
+      cheap: llama-3.3-70b-versatile
+      mid: llama-3.3-70b-versatile
+    budget_usd_daily: 0.0
+    enabled: true
+
+  - id: openrouter-free
+    kind: llm
+    connect: api_key
+    api_base: https://openrouter.ai/api/v1
+    auth: env:OPENROUTER_API_KEY
+    models:
+      cheap: meta-llama/llama-3.3-70b-instruct:free
+      mid: google/gemma-3-27b-it:free
+    budget_usd_daily: 0.0
+    enabled: true
+
+  - id: gemini-free
+    kind: llm
+    connect: api_key
+    api_base: https://generativelanguage.googleapis.com/v1beta/openai/
+    auth: env:GEMINI_API_KEY
+    models:
+      cheap: gemini-2.5-flash
+      mid: gemini-2.5-pro
+    budget_usd_daily: 0.0
+    enabled: true
+
+  - id: deepseek
+    kind: llm
+    connect: api_key
+    api_base: https://api.deepseek.com/v1
+    auth: env:DEEPSEEK_API_KEY
+    models:
+      strong: deepseek-chat
+      cheap: deepseek-chat
+    budget_usd_daily: 2.0
+    enabled: true
+
+  # --- محلي (من غير مفتاح) ---
+  - id: ollama-local
+    kind: llm-local
+    connect: custom_endpoint
+    api_base: http://localhost:11434/v1
+    protocol: openai-completions
+    models:
+      cheap: qwen3:8b
+      mid: qwen3:14b
+    budget_usd_daily: 0.0
+    enabled: true
+
+  # --- قوي (مدفوع، للـ orchestrator والمراجعة) ---
+  - id: anthropic
+    kind: llm
+    connect: api_key
+    api_base: https://api.anthropic.com
+    auth: env:ANTHROPIC_API_KEY
+    models:
+      strong: claude-sonnet-4-5
+      mid: claude-haiku-4-5
+    budget_usd_daily: 5.0
+    enabled: true
+
+  - id: openai
+    kind: llm
+    connect: api_key
+    api_base: https://api.openai.com/v1
+    auth: env:OPENAI_API_KEY
+    models:
+      strong: gpt-5-codex
+      mid: gpt-5-mini
+    budget_usd_daily: 3.0
+    enabled: true
+
+  # --- نقطة نهاية مخصصة (مثال — بدّل الرابط والموديلات) ---
+  - id: my-custom-endpoint
+    kind: llm
+    connect: custom_endpoint
+    api_base: https://my-server.example.com/v1
+    protocol: openai-completions
+    auth: env:MY_ENDPOINT_API_KEY
+    models:
+      cheap: my-cheap-model
+      mid: my-mid-model
+    budget_usd_daily: 0.0
+    enabled: false
+
+  # --- حسابات متعددة لنفس المزود (failover تلقائي) ---
+  # في الـ UI: Settings > Models & accounts > openrouter-free > Add account
+  # لما حساب يقرب من حده، الراوتر بينقل المهمة الجارية للحساب التاني من غير توقف.
+
+  # --- كابتشا (بلجن منفصل — مش شغل البيلدر) ---
+  - id: passxapi
+    kind: captcha
+    api_base: https://www.passxapi.com
+    auth: env:PASSXAPI_API_KEY
+    budget_usd_daily: 0.0  # 0 = رصيد مجاني فقط، ثم يدوي. لا صرف من غير موافقة صريحة.
+    enabled: false  # الافتراضي: يدوي. البلجن بيتفعّل على جهازك بعد التسليم.
+
+# حساب جوجل (منفصل — بيتضاف من Settings > Google Account عبر Vault فقط، مش هنا)
+google:
+  accounts: []  # label + email_masked فقط في العرض، الباسورد مشفرة ومش بتظهر هنا أبداً

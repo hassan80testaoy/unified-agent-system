@@ -25,8 +25,9 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import get_env_secret_by_ref, get_settings, load_yaml_config
+from app.db import utcnow
 from app.models.agents import AgentModel, Run
-from app.models.providers import AgentProviderAssignment, ApiKey, LlmCall, Provider
+from app.models.providers import AgentProviderAssignment, ApiKey, LlmCall, Provider, ProviderAccount
 from app.security.crypto import decrypt_secret
 from app.security.sanitizer import scrub_text
 
@@ -52,20 +53,37 @@ _CHEAP_CACHE: dict[str, dict[str, Any]] = {}
 
 def seed_default_providers(db: Session, workspace_id: str) -> list[Provider]:
     cfg = load_yaml_config("providers.example.yaml")
-    entries = cfg.get("providers", [])
+    entries = list(cfg.get("providers", []))
+    seen_ids = {str(e.get("id")) for e in entries if e.get("id")}
+    v3_cfg = load_yaml_config("providers-v3.example.yaml")
+    v3_by_id = {str(e.get("id")): e for e in v3_cfg.get("providers", []) if e.get("id")}
+    for pid_v3, v3_entry in v3_by_id.items():
+        if pid_v3 not in seen_ids:
+            # Never auto-enable disabled third-party placeholders on seed
+            if v3_entry.get("kind") == "captcha" and not v3_entry.get("enabled", False):
+                continue
+            entries.append(v3_entry)
+            seen_ids.add(pid_v3)
+
     created_or_existing: list[Provider] = []
     for item in entries:
         pid = item["id"]
+        v3_meta = v3_by_id.get(pid, {})
         existing = db.get(Provider, pid)
         if existing is None:
             auth_ref = str(item.get("auth") or "none")
             has_env_key = bool(get_env_secret_by_ref(auth_ref))
             enabled = bool(item.get("enabled", False) or has_env_key or item.get("kind") in {"llm-mock", "captcha"})
+            connect_type = str(item.get("connect") or v3_meta.get("connect") or ("custom_endpoint" if item.get("kind") == "llm-local" else "api_key"))
+            protocol = str(item.get("protocol") or v3_meta.get("protocol") or ("ollama" if item.get("kind") == "llm-local" else "openai-completions"))
             row = Provider(
                 id=pid,
                 workspace_id=workspace_id,
                 name=str(item.get("name") or pid),
                 kind=str(item.get("kind") or "llm"),
+                connect_type=connect_type,
+                protocol=protocol,
+                path_id=item.get("path_id"),
                 api_base=str(item.get("api_base") or ""),
                 auth_ref=auth_ref,
                 models_json=dict(item.get("models") or {}),
@@ -92,6 +110,15 @@ def _resolve_provider_api_key(db: Session, workspace_id: str, provider: Provider
     if key_row:
         return decrypt_secret(key_row.secret_enc)
     return get_env_secret_by_ref(provider.auth_ref)
+
+
+def _list_provider_accounts(db: Session, workspace_id: str, provider_id: str) -> list[ProviderAccount]:
+    return (
+        db.query(ProviderAccount)
+        .filter(ProviderAccount.workspace_id == workspace_id, ProviderAccount.provider_id == provider_id)
+        .order_by(ProviderAccount.priority.asc(), ProviderAccount.created_at.asc())
+        .all()
+    )
 
 
 def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
@@ -231,7 +258,9 @@ def _call_provider_http(
     if provider.kind == "llm-mock":
         return _deterministic_mock_response(prompt, json_schema), max(12, len(prompt) // 4), 48
 
-    if provider.id == "anthropic":
+    protocol = getattr(provider, "protocol", "openai-completions") or "openai-completions"
+
+    if protocol == "anthropic" or provider.id == "anthropic":
         if not api_key:
             raise ProviderUnavailableError("missing_anthropic_api_key")
         headers = {
@@ -254,7 +283,7 @@ def _call_provider_http(
             usage = body.get("usage") or {}
             return text, int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0))
 
-    if provider.id == "gemini-free":
+    if (protocol == "gemini" or provider.id == "gemini-free") and "openai" not in provider.api_base.lower():
         if not api_key:
             raise ProviderUnavailableError("missing_gemini_api_key")
         url = f"{provider.api_base.rstrip('/')}/models/{model}:generateContent?key={api_key}"
@@ -272,7 +301,7 @@ def _call_provider_http(
             meta = body.get("usageMetadata") or {}
             return text, int(meta.get("promptTokenCount", 0)), int(meta.get("candidatesTokenCount", 0))
 
-    if provider.kind == "llm-local":
+    if protocol == "ollama" or provider.kind == "llm-local":
         url = f"{provider.api_base.rstrip('/')}/api/chat"
         payload = {
             "model": model,
@@ -289,6 +318,31 @@ def _call_provider_http(
             body = resp.json()
             text = (body.get("message") or {}).get("content", "")
             return text, int(body.get("prompt_eval_count", 0)), int(body.get("eval_count", 0))
+
+    if protocol == "openai-responses":
+        if not api_key:
+            raise ProviderUnavailableError(f"missing_api_key:{provider.id}")
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": model,
+            "instructions": system_prompt,
+            "input": prompt,
+        }
+        with httpx.Client(timeout=45.0) as client:
+            resp = client.post(f"{provider.api_base.rstrip('/')}/responses", headers=headers, json=payload)
+            if resp.status_code >= 400:
+                raise ProviderUnavailableError(f"{provider.id}_http_{resp.status_code}")
+            body = resp.json()
+            text = str(body.get("output_text") or "")
+            if not text and isinstance(body.get("output"), list):
+                chunks = []
+                for item in body["output"]:
+                    for c in item.get("content", []) if isinstance(item, dict) else []:
+                        if isinstance(c, dict) and c.get("text"):
+                            chunks.append(c["text"])
+                text = "".join(chunks)
+            usage = body.get("usage") or {}
+            return text, int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0))
 
     # OpenAI-compatible (openai, groq-free, openrouter-free)
     if not api_key:
@@ -457,66 +511,51 @@ class LLMRouter:
                 continue
 
             model = (prov.models_json or {}).get(tier) or (prov.models_json or {}).get("mid") or "mock-cheap-v1"
-            api_key = _resolve_provider_api_key(self.db, self.workspace_id, prov)
-            if prov.kind == "llm" and not api_key:
-                last_error = f"missing_api_key:{prov.id}"
-                continue
+            accounts = _list_provider_accounts(self.db, self.workspace_id, prov.id)
+            account_slots: list[ProviderAccount | None]
+            if accounts:
+                account_slots = [a for a in accounts if a.status == "active"]
+                if not account_slots:
+                    last_error = f"all_accounts_resting:{prov.id}"
+                    continue
+            else:
+                account_slots = [None]
 
-            start = time.monotonic()
-            try:
-                raw_out, tok_in, tok_out = _call_provider_http(
-                    prov, model, api_key, clean_prompt, clean_system, json_schema
-                )
-                latency_ms = int((time.monotonic() - start) * 1000)
-                cost = _estimate_cost(model, tok_in, tok_out)
+            for acct in account_slots:
+                if acct is not None and acct.quota_limit > 0 and acct.quota_used >= acct.quota_limit:
+                    acct.status = "resting"
+                    acct.last_failover_at = utcnow()
+                    acct.failover_reason = "quota_limit"
+                    self.db.flush()
+                    last_error = f"account_quota_exhausted:{acct.id}"
+                    continue
 
-                parsed_out: Any = raw_out
-                if json_schema:
-                    parsed_out = json.loads(raw_out)
-                    jsonschema.validate(instance=parsed_out, schema=json_schema)
+                if acct is not None and acct.key_ref_enc:
+                    api_key = decrypt_secret(acct.key_ref_enc)
+                else:
+                    api_key = _resolve_provider_api_key(self.db, self.workspace_id, prov)
 
-                call_row = LlmCall(
-                    workspace_id=self.workspace_id,
-                    run_id=run_id,
-                    agent_id=agent_id,
-                    provider_id=prov.id,
-                    model=model,
-                    tier=tier,
-                    task_type=task_type,
-                    tokens_in=tok_in,
-                    tokens_out=tok_out,
-                    cost_usd=cost,
-                    latency_ms=latency_ms,
-                    cached=False,
-                    ok=True,
-                )
-                self.db.add(call_row)
-                if run_id:
-                    run = self.db.get(Run, run_id)
-                    if run:
-                        run.cost_usd = round(float(run.cost_usd or 0.0) + cost, 6)
-                self.db.flush()
+                if prov.kind == "llm" and not api_key:
+                    last_error = f"missing_api_key:{prov.id}"
+                    continue
 
-                result = {
-                    "provider_id": prov.id,
-                    "model": model,
-                    "tier": tier,
-                    "task_type": task_type,
-                    "output": parsed_out,
-                    "raw_text": raw_out,
-                    "tokens_in": tok_in,
-                    "tokens_out": tok_out,
-                    "cost_usd": cost,
-                    "latency_ms": latency_ms,
-                    "cached": False,
-                }
-                if cache_key and tier == "cheap":
-                    _CHEAP_CACHE[cache_key] = result
-                return result
-            except (json.JSONDecodeError, jsonschema.ValidationError) as exc:
-                latency_ms = int((time.monotonic() - start) * 1000)
-                self.db.add(
-                    LlmCall(
+                start = time.monotonic()
+                try:
+                    raw_out, tok_in, tok_out = _call_provider_http(
+                        prov, model, api_key, clean_prompt, clean_system, json_schema
+                    )
+                    latency_ms = int((time.monotonic() - start) * 1000)
+                    cost = _estimate_cost(model, tok_in, tok_out)
+
+                    parsed_out: Any = raw_out
+                    if json_schema:
+                        parsed_out = json.loads(raw_out)
+                        jsonschema.validate(instance=parsed_out, schema=json_schema)
+
+                    if acct is not None:
+                        acct.quota_used = round(float(acct.quota_used or 0.0) + max(cost, 0.0001), 6)
+
+                    call_row = LlmCall(
                         workspace_id=self.workspace_id,
                         run_id=run_id,
                         agent_id=agent_id,
@@ -524,51 +563,98 @@ class LLMRouter:
                         model=model,
                         tier=tier,
                         task_type=task_type,
-                        tokens_in=0,
-                        tokens_out=0,
-                        cost_usd=0.0,
+                        tokens_in=tok_in,
+                        tokens_out=tok_out,
+                        cost_usd=cost,
                         latency_ms=latency_ms,
-                        ok=False,
-                        error_code=f"schema_validation_failed:{type(exc).__name__}",
+                        cached=False,
+                        ok=True,
                     )
-                )
-                self.db.flush()
-                # Retry once with stronger tier on schema validation failure
-                if tier != "strong":
-                    return self.route(
-                        task_type=task_type,
-                        tier="strong",
-                        prompt=prompt,
-                        system_prompt=system_prompt,
-                        json_schema=json_schema,
-                        agent_id=agent_id,
-                        run_id=run_id,
-                        exclude_provider=exclude_provider,
-                        run_max_budget_usd=run_max_budget_usd,
-                        use_cache=False,
-                        allow_mock_fallback=allow_mock_fallback,
+                    self.db.add(call_row)
+                    if run_id:
+                        run = self.db.get(Run, run_id)
+                        if run:
+                            run.cost_usd = round(float(run.cost_usd or 0.0) + cost, 6)
+                    self.db.flush()
+
+                    result = {
+                        "provider_id": prov.id,
+                        "model": model,
+                        "tier": tier,
+                        "task_type": task_type,
+                        "output": parsed_out,
+                        "raw_text": raw_out,
+                        "tokens_in": tok_in,
+                        "tokens_out": tok_out,
+                        "cost_usd": cost,
+                        "latency_ms": latency_ms,
+                        "cached": False,
+                    }
+                    if acct is not None:
+                        result["account_id"] = acct.id
+                        result["account_label"] = acct.label
+                    if cache_key and tier == "cheap":
+                        _CHEAP_CACHE[cache_key] = result
+                    return result
+                except (json.JSONDecodeError, jsonschema.ValidationError) as exc:
+                    latency_ms = int((time.monotonic() - start) * 1000)
+                    self.db.add(
+                        LlmCall(
+                            workspace_id=self.workspace_id,
+                            run_id=run_id,
+                            agent_id=agent_id,
+                            provider_id=prov.id,
+                            model=model,
+                            tier=tier,
+                            task_type=task_type,
+                            tokens_in=0,
+                            tokens_out=0,
+                            cost_usd=0.0,
+                            latency_ms=latency_ms,
+                            ok=False,
+                            error_code=f"schema_validation_failed:{type(exc).__name__}",
+                        )
                     )
-                last_error = f"schema_validation_failed:{exc}"
-            except Exception as exc:
-                last_error = str(exc)
-                self.db.add(
-                    LlmCall(
-                        workspace_id=self.workspace_id,
-                        run_id=run_id,
-                        agent_id=agent_id,
-                        provider_id=prov.id,
-                        model=model,
-                        tier=tier,
-                        task_type=task_type,
-                        tokens_in=0,
-                        tokens_out=0,
-                        cost_usd=0.0,
-                        latency_ms=int((time.monotonic() - start) * 1000),
-                        ok=False,
-                        error_code=type(exc).__name__,
+                    self.db.flush()
+                    if tier != "strong":
+                        return self.route(
+                            task_type=task_type,
+                            tier="strong",
+                            prompt=prompt,
+                            system_prompt=system_prompt,
+                            json_schema=json_schema,
+                            agent_id=agent_id,
+                            run_id=run_id,
+                            exclude_provider=exclude_provider,
+                            run_max_budget_usd=run_max_budget_usd,
+                            use_cache=False,
+                            allow_mock_fallback=allow_mock_fallback,
+                        )
+                    last_error = f"schema_validation_failed:{exc}"
+                except Exception as exc:
+                    last_error = str(exc)
+                    if acct is not None:
+                        acct.status = "resting"
+                        acct.last_failover_at = utcnow()
+                        acct.failover_reason = last_error[:120]
+                    self.db.add(
+                        LlmCall(
+                            workspace_id=self.workspace_id,
+                            run_id=run_id,
+                            agent_id=agent_id,
+                            provider_id=prov.id,
+                            model=model,
+                            tier=tier,
+                            task_type=task_type,
+                            tokens_in=0,
+                            tokens_out=0,
+                            cost_usd=0.0,
+                            latency_ms=int((time.monotonic() - start) * 1000),
+                            ok=False,
+                            error_code=type(exc).__name__,
+                        )
                     )
-                )
-                self.db.flush()
+                    self.db.flush()
 
         if budget_reasons and len(budget_reasons) == len(candidates):
             raise BudgetExceededError("; ".join(budget_reasons))

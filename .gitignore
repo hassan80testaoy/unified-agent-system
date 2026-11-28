@@ -39,3 +39,7 @@ Thumbs.db
 
 # AEO working files (kept local per session)
 .aeo/
+
+# Reference repositories (keep SOURCES.md only)
+references/*
+!references/SOURCES.md

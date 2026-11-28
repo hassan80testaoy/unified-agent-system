@@ -14,7 +14,9 @@ from app.routers import (
     auth_router,
     backlinks_router,
     captcha_vault_reports_router,
+    chat_router,
     mail_google_router,
+    modes_router,
     tasks_runs_router,
 )
 from app.security.sanitizer import install_log_sanitizer
@@ -53,3 +55,5 @@ app.include_router(tasks_runs_router.router)
 app.include_router(backlinks_router.router)
 app.include_router(mail_google_router.router)
 app.include_router(captcha_vault_reports_router.router)
+app.include_router(modes_router.router)
+app.include_router(chat_router.router)

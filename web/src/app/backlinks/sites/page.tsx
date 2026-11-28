@@ -15,6 +15,12 @@ interface SiteRow {
   is_noindex: boolean;
   status: string;
   blocked_reason: string | null;
+  replay_stats?: {
+    latest_version: number;
+    replay_count: number;
+    saved_steps_total: number;
+    saved_llm_calls_total: number;
+  } | null;
 }
 
 export default function BacklinkSitesPage() {
@@ -88,6 +94,7 @@ export default function BacklinkSitesPage() {
               <th className="p-3 text-start">{locale === "ar" ? "الدومين" : "Domain"}</th>
               <th className="p-3 text-start">{locale === "ar" ? "الفئة" : "Category"}</th>
               <th className="p-3 text-start">{locale === "ar" ? "الحالة" : "Status"}</th>
+              <th className="p-3 text-start">{t("replay.title")}</th>
               <th className="p-3 text-start">{locale === "ar" ? "سبب الحظر" : "Reason"}</th>
               <th className="p-3 text-start">{locale === "ar" ? "إجراءات" : "Actions"}</th>
             </tr>
@@ -102,6 +109,15 @@ export default function BacklinkSitesPage() {
                 <td className="p-3 text-muted">{s.category || "—"}</td>
                 <td className="p-3">
                   <StatusBadge status={s.status} />
+                </td>
+                <td className="p-3 text-muted">
+                  {s.replay_stats ? (
+                    <span className="rounded bg-primary/10 px-2 py-0.5 font-mono text-[11px] text-primary">
+                      v{s.replay_stats.latest_version} · {s.replay_stats.replay_count}x · -{s.replay_stats.saved_steps_total} steps / -{s.replay_stats.saved_llm_calls_total} LLM
+                    </span>
+                  ) : (
+                    t("replay.no_session")
+                  )}
                 </td>
                 <td className="p-3 text-muted">{s.blocked_reason || (s.is_noindex ? "noindex" : "—")}</td>
                 <td className="p-3">

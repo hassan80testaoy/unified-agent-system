@@ -13,6 +13,7 @@ Workflow:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -79,6 +80,19 @@ def novnc_tunnel_instructions() -> dict[str, Any]:
     }
 
 
+def _extract_site_key(html: str) -> str | None:
+    """Passively extract public widget data-sitekey from challenge HTML if present."""
+    if not html:
+        return None
+    m = re.search(r'data-sitekey=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    m_qs = re.search(r'[?&](?:sitekey|k)=([A-Za-z0-9_-]{10,128})', html, re.IGNORECASE)
+    if m_qs:
+        return m_qs.group(1).strip()
+    return None
+
+
 @register_solver("manual")
 class ManualSolver:
     """Default & sole built-in solver: human completes challenge in live noVNC browser."""
@@ -139,6 +153,7 @@ class ManualSolver:
             site=page_url,
             challenge_type=detected_type,
             page_url=page_url,
+            site_key=_extract_site_key(html),
             blocked_reason=blocked_reason,
         )
 
