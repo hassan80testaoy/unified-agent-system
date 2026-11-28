@@ -27,6 +27,7 @@ from app.models.providers import ApiKey, LlmCall, ModelRoute, Provider
 from app.security.auth import AuthContext, get_current_auth, record_audit, require_roles
 from app.security.crypto import decrypt_secret, encrypt_secret, mask_last4
 from app.security.killswitch import activate_killswitch, deactivate_killswitch, get_killswitch_status
+from app.services.model_catalogue import AUTO_SYNC_PROVIDERS, sync_provider_catalogue
 from app.services.reports import compute_real_metrics, generate_report, render_report_printable_html
 from app.services.runtime_checks import get_runtime_readiness
 from app.services.vault import create_vault_request, get_vault_request_status, submit_vault_request
@@ -319,7 +320,7 @@ def get_settings_summary(auth: AuthContext = Depends(get_current_auth), db: Sess
 
 
 @router.put("/api/settings/keys/{provider}")
-def put_provider_key(
+async def put_provider_key(
     provider: str,
     req: ApiKeyPutRequest,
     request: Request,
@@ -350,8 +351,15 @@ def put_provider_key(
         ip=request.client.host if request.client else None,
         details={"last4": l4},
     )
+    db.flush()
+
+    cat_summary = None
+    if prov and prov.workspace_id == auth.workspace.id and prov.id in AUTO_SYNC_PROVIDERS:
+        sync_res = await sync_provider_catalogue(db, auth.workspace.id, prov)
+        cat_summary = sync_res.get("catalogue")
+
     db.commit()
-    return {"provider": provider, "last4": l4}
+    return {"provider": provider, "last4": l4, "catalogue": cat_summary}
 
 
 @router.put("/api/settings/router")

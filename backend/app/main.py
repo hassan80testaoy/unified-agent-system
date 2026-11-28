@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +25,7 @@ from app.routers import (
 )
 from app.security.sanitizer import install_log_sanitizer
 from app.services.coding_agent import resume_interrupted_threads
+from app.services.model_catalogue import catalogue_daily_refresh_loop
 
 
 @asynccontextmanager
@@ -38,7 +41,21 @@ async def lifespan(_app: FastAPI):
         db.rollback()
     finally:
         db.close()
-    yield
+
+    stop_event = asyncio.Event()
+    refresh_task: asyncio.Task[None] | None = None
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        refresh_task = asyncio.create_task(catalogue_daily_refresh_loop(stop_event))
+    try:
+        yield
+    finally:
+        stop_event.set()
+        if refresh_task is not None:
+            refresh_task.cancel()
+            try:
+                await refresh_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(

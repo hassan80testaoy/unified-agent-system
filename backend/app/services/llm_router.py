@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from app.config import get_env_secret_by_ref, get_settings, load_yaml_config
 from app.db import utcnow
 from app.models.agents import AgentModel, Run
-from app.models.providers import AgentProviderAssignment, ApiKey, LlmCall, Provider, ProviderAccount
+from app.models.providers import AgentProviderAssignment, ApiKey, LlmCall, Provider, ProviderAccount, RoleModelAssignment
 from app.security.crypto import decrypt_secret
 from app.security.sanitizer import scrub_text
 from app.services.runtime_checks import is_local_endpoint
@@ -361,10 +361,13 @@ def _call_provider_http(
             usage = body.get("usage") or {}
             return text, int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0))
 
-    # OpenAI-compatible (openai, groq-free, openrouter-free)
-    if not api_key:
+    # OpenAI-compatible (openai, groq-free, openrouter-free, freellmapi, free-claude-code)
+    allow_keyless_local = is_local_endpoint(provider.api_base) and provider.id in {"freellmapi", "free-claude-code"}
+    if not api_key and not allow_keyless_local:
         raise ProviderUnavailableError(f"missing_api_key:{provider.id}")
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     if "openrouter.ai" in provider.api_base.lower():
         headers["HTTP-Referer"] = "http://localhost:3010"
         headers["X-Title"] = "Unified Agent System"
@@ -469,6 +472,7 @@ class LLMRouter:
         agent_id: str | None = None,
         run_id: str | None = None,
         preferred_provider: str | None = None,
+        preferred_model: str | None = None,
         exclude_provider: str | None = None,
         run_max_budget_usd: float | None = None,
         use_cache: bool = True,
@@ -476,6 +480,8 @@ class LLMRouter:
     ) -> dict[str, Any]:
         clean_prompt = scrub_text(prompt)
         clean_system = scrub_text(system_prompt)
+        explicit_model = preferred_model.strip() if isinstance(preferred_model, str) and preferred_model.strip() else None
+        explicit_provider = preferred_provider
 
         # Lookup per-agent delegation override if no explicit preferred_provider passed
         if agent_id and not preferred_provider:
@@ -484,21 +490,57 @@ class LLMRouter:
                 if task_type == "orchestrate":
                     preferred_provider = (assignment.orchestrator_json or {}).get("provider")
                     tier = (assignment.orchestrator_json or {}).get("tier", tier)
+                    explicit_model = explicit_model or (assignment.orchestrator_json or {}).get("model")
+                    explicit_provider = preferred_provider
                 elif task_type == "review":
                     preferred_provider = (assignment.reviewer_json or {}).get("provider")
                     tier = (assignment.reviewer_json or {}).get("tier", tier)
+                    explicit_model = explicit_model or (assignment.reviewer_json or {}).get("model")
+                    explicit_provider = preferred_provider
                 elif task_type in (assignment.workers_json or {}):
                     w = assignment.workers_json[task_type]
                     preferred_provider = w.get("provider")
                     tier = w.get("tier", tier)
+                    explicit_model = explicit_model or w.get("model")
+                    explicit_provider = preferred_provider
+
+        # Workspace role-model override (orchestrator / worker / reviewer / coding_*)
+        if task_type != "healthcheck":
+            role_key = (
+                "orchestrator"
+                if task_type == "orchestrate"
+                else "reviewer"
+                if task_type == "review"
+                else task_type
+                if task_type.startswith("coding_")
+                else "worker"
+            )
+            role_row = (
+                self.db.query(RoleModelAssignment)
+                .filter(RoleModelAssignment.workspace_id == self.workspace_id, RoleModelAssignment.role_key == role_key)
+                .first()
+            )
+            if role_row and role_row.provider_id and role_row.provider_id != exclude_provider:
+                if not preferred_provider:
+                    preferred_provider = role_row.provider_id
+                    tier = role_row.tier or tier
+                    explicit_provider = role_row.provider_id
+                    if not explicit_model and role_row.model:
+                        explicit_model = role_row.model
+                elif preferred_provider == role_row.provider_id and not explicit_model and role_row.model:
+                    explicit_model = role_row.model
+                    explicit_provider = role_row.provider_id
 
         # Enforce reviewer separation even if misconfigured in DB
         if exclude_provider and preferred_provider == exclude_provider:
             preferred_provider = None
+            if explicit_provider == exclude_provider:
+                explicit_provider = None
+                explicit_model = None
 
         cache_key = ""
         if use_cache and tier == "cheap":
-            raw_k = f"{task_type}:{tier}:{preferred_provider}:{exclude_provider}:{clean_prompt}"
+            raw_k = f"{task_type}:{tier}:{preferred_provider}:{explicit_model}:{exclude_provider}:{clean_prompt}"
             cache_key = hashlib.sha256(raw_k.encode("utf-8")).hexdigest()
             if cache_key in _CHEAP_CACHE:
                 cached = dict(_CHEAP_CACHE[cache_key])
@@ -532,7 +574,16 @@ class LLMRouter:
                 budget_reasons.append(budget_reason or "budget_exceeded")
                 continue
 
-            model = (prov.models_json or {}).get(tier) or (prov.models_json or {}).get("mid") or "mock-cheap-v1"
+            default_tier_model = (
+                (prov.models_json or {}).get(tier)
+                or (prov.models_json or {}).get("mid")
+                or (prov.models_json or {}).get("cheap")
+                or "auto"
+            )
+            if explicit_model and (not explicit_provider or explicit_provider == prov.id):
+                model = explicit_model
+            else:
+                model = default_tier_model
             accounts = _list_provider_accounts(self.db, self.workspace_id, prov.id)
             account_slots: list[ProviderAccount | None]
             if accounts:
@@ -557,7 +608,8 @@ class LLMRouter:
                 else:
                     api_key = _resolve_provider_api_key(self.db, self.workspace_id, prov)
 
-                if prov.kind == "llm" and not api_key:
+                allow_keyless_local = is_local_endpoint(prov.api_base) and prov.id in {"freellmapi", "free-claude-code"}
+                if prov.kind == "llm" and not api_key and not allow_keyless_local:
                     last_error = f"missing_api_key:{prov.id}"
                     continue
 

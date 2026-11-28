@@ -185,5 +185,20 @@
     "spawn_subagent": "Spawn Subagent",
     "goals_title": "Autopilot Goals",
     "hooks_title": "Execution Hooks"
+  },
+  "catalogue": {
+    "button_open": "Model Catalogue",
+    "button_refresh": "Refresh Catalogue",
+    "search_ph": "Search model id or family...",
+    "all_families": "All families",
+    "stale_badge": "Catalogue stale (>24h) — refresh",
+    "save_tiers": "Save Tier Models",
+    "manual_slugs_label": "Manual model slugs (<provider-id>/<model-id>, one per line)",
+    "save_slugs": "Save Manual Slugs"
+  },
+  "role_models": {
+    "title": "Per-Role Model Assignments",
+    "subtitle": "Orchestrator and worker may share a provider; reviewer must differ. Defaults to auto.",
+    "save_all": "Save Role Assignments"
   }
 }

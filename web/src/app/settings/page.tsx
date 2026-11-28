@@ -18,6 +18,40 @@ interface ProviderAccountItem {
   last_failover_at: string | null;
 }
 
+interface CatalogueSummary {
+  total_count: number;
+  fetched_count: number;
+  manual_count: number;
+  last_fetched_at: string | null;
+  stale: boolean;
+  last_fetch_ok: boolean | null;
+  last_fetch_error: string | null;
+  supports_models_endpoint: boolean | null;
+  manual_slugs: string[];
+  empty_state_ar: string | null;
+  empty_state_en: string | null;
+  fallback_note_ar: string | null;
+  fallback_note_en: string | null;
+}
+
+interface CataloguePage {
+  provider_id: string;
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+  families: string[];
+  items: { id: string; display_name: string; family: string; source: string; fetched_at: string | null }[];
+  summary: CatalogueSummary;
+}
+
+interface RoleModelConfig {
+  role_key: string;
+  provider_id: string | null;
+  tier: string;
+  model: string;
+}
+
 interface ProviderItem {
   id: string;
   name: string;
@@ -27,12 +61,14 @@ interface ProviderItem {
   path_id?: string | null;
   api_base: string;
   local_only?: boolean;
+  models?: Record<string, string>;
   budget_usd_daily: number;
   budget_usd_monthly: number;
   enabled: boolean;
   has_key: boolean;
   key_last4: string;
   accounts?: ProviderAccountItem[];
+  catalogue?: CatalogueSummary;
 }
 
 interface ModeItem {
@@ -105,12 +141,120 @@ export default function SettingsPage() {
   // Memory add
   const [memText, setMemText] = useState("");
 
+  // Phase 4 Catalogue & Per-Role Models
+  const [openCatalogueId, setOpenCatalogueId] = useState<string | null>(null);
+  const [catData, setCatData] = useState<CataloguePage | null>(null);
+  const [catSearch, setCatSearch] = useState("");
+  const [catFamily, setCatFamily] = useState("");
+  const [catPage, setCatPage] = useState(1);
+  const [tierDraft, setTierDraft] = useState<Record<string, { cheap: string; mid: string; strong: string }>>({});
+  const [manualSlugsDraft, setManualSlugsDraft] = useState<Record<string, string>>({});
+  const [roleModels, setRoleModels] = useState<Record<string, RoleModelConfig>>({});
+
   const load = () => {
-    apiFetch<{ providers: ProviderItem[] }>("/api/providers").then((r) => setProviders(r.providers)).catch(() => null);
+    apiFetch<{ providers: ProviderItem[] }>("/api/providers")
+      .then((r) => {
+        setProviders(r.providers);
+        const tDraft: Record<string, { cheap: string; mid: string; strong: string }> = {};
+        const sDraft: Record<string, string> = {};
+        for (const p of r.providers) {
+          tDraft[p.id] = {
+            cheap: p.models?.cheap || (p.id === "freellmapi" ? "auto" : ""),
+            mid: p.models?.mid || (p.id === "freellmapi" ? "auto" : ""),
+            strong: p.models?.strong || (p.id === "freellmapi" ? "auto" : ""),
+          };
+          sDraft[p.id] = (p.catalogue?.manual_slugs || []).join("\n");
+        }
+        setTierDraft(tDraft);
+        setManualSlugsDraft((prev) => ({ ...sDraft, ...prev }));
+      })
+      .catch(() => null);
+    apiFetch<{ roles: Record<string, RoleModelConfig> }>("/api/settings/role-models")
+      .then((r) => setRoleModels(r.roles || {}))
+      .catch(() => null);
     apiFetch<{ modes: ModeItem[] }>("/api/modes").then((r) => setModes(r.modes)).catch(() => null);
     apiFetch<{ google_accounts: GoogleAccountItem[] }>("/api/google-accounts").then((r) => setGoogleAccounts(r.google_accounts)).catch(() => null);
     apiFetch<{ memory: MemoryItem[] }>("/api/memory").then((r) => setMemories(r.memory)).catch(() => null);
     apiFetch<{ tunnel: { ssh_command: string } }>("/api/settings").then((r) => setTunnelCmd(r.tunnel?.ssh_command || "")).catch(() => null);
+  };
+
+  const loadCataloguePage = (pid: string, q = catSearch, family = catFamily, page = catPage) => {
+    const params = new URLSearchParams({
+      q,
+      family,
+      page: String(page),
+      page_size: "25",
+    });
+    apiFetch<CataloguePage>(`/api/providers/${pid}/catalogue?${params.toString()}`)
+      .then((res) => setCatData(res))
+      .catch(() => null);
+  };
+
+  const toggleCatalogueDrawer = (pid: string) => {
+    if (openCatalogueId === pid) {
+      setOpenCatalogueId(null);
+      setCatData(null);
+      return;
+    }
+    setOpenCatalogueId(pid);
+    setCatSearch("");
+    setCatFamily("");
+    setCatPage(1);
+    loadCataloguePage(pid, "", "", 1);
+  };
+
+  const refreshCatalogue = async (pid: string) => {
+    const res = await apiFetch<{ ok: boolean; models: unknown[]; error?: string; empty_state_ar?: string | null }>(
+      `/api/providers/${pid}/catalogue/refresh`,
+      { method: "POST" }
+    );
+    if (res.ok && res.models.length > 0) {
+      setStatusMsg(locale === "ar" ? `تم تحديث الكتالوج (${res.models.length} موديل).` : `Refreshed catalogue (${res.models.length} models).`);
+    } else if (res.empty_state_ar) {
+      setStatusMsg(res.empty_state_ar);
+    } else {
+      setStatusMsg(locale === "ar" ? `تعذر الجلب (${res.error || "empty"}).` : `Fetch result: ${res.error || "empty"}`);
+    }
+    load();
+    if (openCatalogueId === pid) {
+      loadCataloguePage(pid, catSearch, catFamily, 1);
+    }
+  };
+
+  const saveTierModels = async (pid: string) => {
+    const d = tierDraft[pid] || { cheap: "auto", mid: "auto", strong: "auto" };
+    await apiFetch(`/api/providers/${pid}/tiers`, {
+      method: "PUT",
+      body: JSON.stringify(d),
+    });
+    setStatusMsg(locale === "ar" ? `تم حفظ موديلات المستويات لـ ${pid}.` : `Saved tier models for ${pid}.`);
+    load();
+  };
+
+  const saveManualSlugs = async (pid: string) => {
+    await apiFetch(`/api/providers/${pid}/catalogue/manual-slugs`, {
+      method: "PUT",
+      body: JSON.stringify({ slugs_text: manualSlugsDraft[pid] || "" }),
+    });
+    setStatusMsg(locale === "ar" ? `تم حفظ الموديلات اليدوية لـ ${pid}.` : `Saved manual slugs for ${pid}.`);
+    load();
+    if (openCatalogueId === pid) {
+      loadCataloguePage(pid, catSearch, catFamily, 1);
+    }
+  };
+
+  const saveRoleModels = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await apiFetch<{ roles: Record<string, RoleModelConfig> }>("/api/settings/role-models", {
+        method: "PUT",
+        body: JSON.stringify({ roles: roleModels }),
+      });
+      setRoleModels(res.roles);
+      setStatusMsg(locale === "ar" ? "تم حفظ تخصيص الموديلات حسب الدور." : "Saved per-role model assignments.");
+    } catch (err: unknown) {
+      setStatusMsg(err instanceof Error ? err.message : String(err));
+    }
   };
 
   useEffect(() => {
@@ -582,11 +726,301 @@ export default function SettingsPage() {
                       )}
                     </div>
                   </div>
+
+                  {/* Catalogue Summary + Drawer Trigger */}
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-borderline/60 pt-2">
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted">
+                      <span>
+                        {locale === "ar" ? "الكتالوج:" : "Catalogue:"}{" "}
+                        <bdi dir="ltr" className="font-mono font-semibold text-ink">
+                          {p.catalogue?.total_count ?? 0}
+                        </bdi>
+                      </span>
+                      {p.catalogue?.last_fetched_at && (
+                        <span>
+                          · {locale === "ar" ? "آخر تحديث:" : "Updated:"}{" "}
+                          <bdi dir="ltr" className="font-mono">{p.catalogue.last_fetched_at.slice(0, 19).replace("T", " ")}</bdi>
+                        </span>
+                      )}
+                      {p.catalogue?.stale && (p.id === "freellmapi" || p.id === "free-claude-code") && (
+                        <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-warning">
+                          {t("catalogue.stale_badge")}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => refreshCatalogue(p.id)}
+                        className="inline-flex items-center gap-1 rounded border border-borderline bg-surface px-2 py-1 hover:border-primary"
+                      >
+                        <RefreshCw className="h-3 w-3" />
+                        <span>{t("catalogue.button_refresh")}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => toggleCatalogueDrawer(p.id)}
+                        className="rounded border border-primary/40 bg-primary/10 px-2 py-1 font-semibold text-primary"
+                      >
+                        {t("catalogue.button_open")}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Expanded Model Catalogue Drawer */}
+                  {openCatalogueId === p.id && (
+                    <div className="mt-2 space-y-3 rounded-lg border border-borderline bg-surface p-3">
+                      {p.id === "freellmapi" && (catData?.summary?.empty_state_ar || ((p.catalogue?.total_count ?? 0) === 0)) && (
+                        <div className="rounded-lg border border-warning/40 bg-amber-500/10 p-2.5 text-xs text-warning">
+                          <div>
+                            {locale === "ar"
+                              ? "لا توجد مفاتيح في FreeLLMAPI — أضف مفاتيح من "
+                              : "No API keys configured in FreeLLMAPI — add keys at "}
+                            <a href="http://localhost:3001/Keys" target="_blank" rel="noreferrer" className="underline font-mono">
+                              http://localhost:3001/Keys
+                            </a>
+                          </div>
+                        </div>
+                      )}
+
+                      {p.id === "free-claude-code" && catData?.summary?.fallback_note_ar && (
+                        <div className="rounded-lg border border-info/30 bg-info/10 p-2 text-[11px] text-info">
+                          {locale === "ar" ? catData.summary.fallback_note_ar : catData.summary.fallback_note_en}
+                        </div>
+                      )}
+
+                      {/* 3-Tier Pickers */}
+                      <div className="grid gap-2 sm:grid-cols-4 items-end">
+                        {(["cheap", "mid", "strong"] as const).map((tierKey) => (
+                          <div key={tierKey}>
+                            <label className="mb-1 block font-mono text-[10px] text-muted">{tierKey}</label>
+                            <input
+                              type="text"
+                              dir="ltr"
+                              value={tierDraft[p.id]?.[tierKey] ?? ""}
+                              onChange={(e) =>
+                                setTierDraft((prev) => ({
+                                  ...prev,
+                                  [p.id]: {
+                                    ...(prev[p.id] || { cheap: "", mid: "", strong: "" }),
+                                    [tierKey]: e.target.value,
+                                  },
+                                }))
+                              }
+                              placeholder={p.id === "freellmapi" ? "auto" : "model-id"}
+                              className="w-full rounded border border-borderline bg-canvas px-2 py-1 text-end font-mono text-[11px]"
+                            />
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() => saveTierModels(p.id)}
+                          className="rounded bg-primary px-2.5 py-1.5 font-semibold text-white"
+                        >
+                          {t("catalogue.save_tiers")}
+                        </button>
+                      </div>
+
+                      {/* Manual Slugs (for FCC / custom fallback) */}
+                      {(p.id === "free-claude-code" || p.catalogue?.supports_models_endpoint === false) && (
+                        <div className="space-y-1.5 border-t border-borderline pt-2">
+                          <label className="block text-[11px] font-semibold">{t("catalogue.manual_slugs_label")}</label>
+                          <div className="flex flex-wrap gap-2">
+                            <textarea
+                              dir="ltr"
+                              rows={2}
+                              value={manualSlugsDraft[p.id] ?? ""}
+                              onChange={(e) =>
+                                setManualSlugsDraft((prev) => ({ ...prev, [p.id]: e.target.value }))
+                              }
+                              placeholder={"open_router/openrouter/free\ngroq/llama-3.3-70b-versatile"}
+                              className="flex-1 rounded border border-borderline bg-canvas p-2 text-end font-mono text-[11px]"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => saveManualSlugs(p.id)}
+                              className="self-end rounded border border-borderline bg-canvas px-3 py-1.5 font-semibold hover:border-primary"
+                            >
+                              {t("catalogue.save_slugs")}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Search & Paginated List (25 per page) */}
+                      <div className="flex flex-wrap items-center gap-2 border-t border-borderline pt-2">
+                        <input
+                          type="text"
+                          value={catSearch}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setCatSearch(val);
+                            setCatPage(1);
+                            loadCataloguePage(p.id, val, catFamily, 1);
+                          }}
+                          placeholder={t("catalogue.search_ph")}
+                          className="flex-1 rounded border border-borderline bg-canvas px-2.5 py-1 text-xs"
+                        />
+                        <select
+                          value={catFamily}
+                          onChange={(e) => {
+                            const fam = e.target.value;
+                            setCatFamily(fam);
+                            setCatPage(1);
+                            loadCataloguePage(p.id, catSearch, fam, 1);
+                          }}
+                          className="rounded border border-borderline bg-canvas px-2 py-1 text-xs"
+                        >
+                          <option value="">{t("catalogue.all_families")}</option>
+                          {(catData?.families || []).map((f) => (
+                            <option key={f} value={f}>
+                              {f}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {catData && catData.items.length > 0 && (
+                        <>
+                          <div className="max-h-56 space-y-1 overflow-y-auto">
+                            {catData.items.map((m) => (
+                              <div
+                                key={m.id}
+                                className="flex flex-wrap items-center justify-between gap-2 rounded border border-borderline/60 bg-canvas px-2 py-1 text-[11px]"
+                              >
+                                <div className="flex items-center gap-2">
+                                  <bdi dir="ltr" className="font-mono font-semibold">{m.id}</bdi>
+                                  {m.family && <span className="rounded bg-surface px-1.5 py-0.5 text-[10px] text-muted">{m.family}</span>}
+                                </div>
+                                <div className="flex gap-1">
+                                  {(["cheap", "mid", "strong"] as const).map((tierKey) => (
+                                    <button
+                                      key={tierKey}
+                                      type="button"
+                                      onClick={() =>
+                                        setTierDraft((prev) => ({
+                                          ...prev,
+                                          [p.id]: {
+                                            ...(prev[p.id] || { cheap: "auto", mid: "auto", strong: "auto" }),
+                                            [tierKey]: m.id,
+                                          },
+                                        }))
+                                      }
+                                      className="rounded border border-borderline bg-surface px-1.5 py-0.5 font-mono text-[10px] hover:border-primary"
+                                    >
+                                      {tierKey}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="flex items-center justify-between text-[11px] text-muted">
+                            <span>
+                              {catData.page} / {catData.total_pages} ({catData.total})
+                            </span>
+                            <div className="flex gap-1.5">
+                              <button
+                                type="button"
+                                disabled={catPage <= 1}
+                                onClick={() => {
+                                  const np = Math.max(1, catPage - 1);
+                                  setCatPage(np);
+                                  loadCataloguePage(p.id, catSearch, catFamily, np);
+                                }}
+                                className="rounded border border-borderline px-2 py-0.5 disabled:opacity-40"
+                              >
+                                &lsaquo;
+                              </button>
+                              <button
+                                type="button"
+                                disabled={catPage >= catData.total_pages}
+                                onClick={() => {
+                                  const np = Math.min(catData.total_pages, catPage + 1);
+                                  setCatPage(np);
+                                  loadCataloguePage(p.id, catSearch, catFamily, np);
+                                }}
+                                className="rounded border border-borderline px-2 py-0.5 disabled:opacity-40"
+                              >
+                                &rsaquo;
+                              </button>
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           ))}
         </div>
+      </section>
+
+      {/* 2a-bis. Per-Role Provider & Model Selector */}
+      <section className="rounded-xl border border-borderline bg-surface p-4 space-y-3">
+        <div>
+          <h2 className="text-base font-bold">{t("role_models.title")}</h2>
+          <p className="text-xs text-muted">{t("role_models.subtitle")}</p>
+        </div>
+        <form onSubmit={saveRoleModels} className="space-y-2 text-xs">
+          <div className="grid gap-2">
+            {Object.entries(roleModels).map(([rk, cfg]) => (
+              <div key={rk} className="grid gap-2 rounded-lg border border-borderline bg-canvas p-2.5 sm:grid-cols-4 items-center">
+                <span className="font-mono font-semibold">{rk}</span>
+                <select
+                  value={cfg.provider_id || ""}
+                  onChange={(e) =>
+                    setRoleModels((prev) => ({
+                      ...prev,
+                      [rk]: { ...prev[rk], provider_id: e.target.value || null },
+                    }))
+                  }
+                  className="rounded border border-borderline bg-surface px-2 py-1"
+                >
+                  <option value="">auto / router default</option>
+                  {providers
+                    .filter((pr) => pr.kind !== "captcha")
+                    .map((pr) => (
+                      <option key={pr.id} value={pr.id}>
+                        {pr.id}
+                      </option>
+                    ))}
+                </select>
+                <select
+                  value={cfg.tier || "mid"}
+                  onChange={(e) =>
+                    setRoleModels((prev) => ({
+                      ...prev,
+                      [rk]: { ...prev[rk], tier: e.target.value },
+                    }))
+                  }
+                  className="rounded border border-borderline bg-surface px-2 py-1 font-mono"
+                >
+                  <option value="cheap">cheap</option>
+                  <option value="mid">mid</option>
+                  <option value="strong">strong</option>
+                </select>
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={cfg.model || "auto"}
+                  onChange={(e) =>
+                    setRoleModels((prev) => ({
+                      ...prev,
+                      [rk]: { ...prev[rk], model: e.target.value },
+                    }))
+                  }
+                  placeholder="auto"
+                  className="rounded border border-borderline bg-surface px-2 py-1 text-end font-mono"
+                />
+              </div>
+            ))}
+          </div>
+          <button type="submit" className="rounded-lg bg-primary px-4 py-2 font-semibold text-white">
+            {t("role_models.save_all")}
+          </button>
+        </form>
       </section>
 
       {/* 2b. Modes Presets (Zadloop + AFH + DeepSeek Harness) */}

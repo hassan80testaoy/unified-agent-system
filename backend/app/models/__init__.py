@@ -52,6 +52,8 @@ from app.models.providers import (
     ModelRoute,
     Provider,
     ProviderAccount,
+    ProviderModel,
+    RoleModelAssignment,
 )
 from app.models.v3_harness import (
     BlSession,
@@ -96,6 +98,8 @@ __all__ = [
     "AgentMemory",
     "Provider",
     "ProviderAccount",
+    "ProviderModel",
+    "RoleModelAssignment",
     "AgentProviderAssignment",
     "ModelRoute",
     "LlmCall",

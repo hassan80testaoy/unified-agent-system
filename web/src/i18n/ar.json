@@ -185,5 +185,20 @@
     "spawn_subagent": "إطلاق وكيل فرعي",
     "goals_title": "الأهداف المستقلة (Autopilot)",
     "hooks_title": "قواعد الحماية والربط (Hooks)"
+  },
+  "catalogue": {
+    "button_open": "كتالوج الموديلات",
+    "button_refresh": "تحديث الكتالوج",
+    "search_ph": "ابحث باسم الموديل أو العائلة...",
+    "all_families": "كل العائلات",
+    "stale_badge": "قد يكون قديماً (+24س) — حدّث الكتالوج",
+    "save_tiers": "حفظ موديلات المستويات",
+    "manual_slugs_label": "Slugs يدوية (<provider-id>/<model-id> — واحد في كل سطر)",
+    "save_slugs": "حفظ القائمة اليدوية"
+  },
+  "role_models": {
+    "title": "تخصيص المزود والموديل حسب الدور",
+    "subtitle": "يُسمح بنفس المزود للـ orchestrator والـ worker؛ مزود المراجع (reviewer) فقط يجب أن يختلف. الافتراضي هو auto.",
+    "save_all": "حفظ تعيينات الأدوار"
   }
 }

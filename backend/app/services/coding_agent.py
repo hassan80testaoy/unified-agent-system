@@ -30,7 +30,7 @@ from app.config import get_settings
 from app.db import new_uuid, utcnow
 from app.models.agents import Artifact, Goal
 from app.models.coding import CodingThread, HookRule, ModelRace
-from app.models.providers import Provider
+from app.models.providers import Provider, RoleModelAssignment
 from app.services.coding_browser_verify import verify_app_in_real_browser
 from app.services.coding_hooks import run_hooks
 from app.services.coding_worktree import (
@@ -287,18 +287,34 @@ def _check_parallel_capacity(db: Session, workspace_id: str, exclude_thread_id: 
 
 def _maybe_llm_plan_enhancement(db: Session, thread: CodingThread, prompt: str) -> str | None:
     """Use configured real (non-mock) LLM provider if selected & available; never fail if offline."""
-    if not thread.model_provider_id or thread.model_provider_id == "mock-local":
+    pref_provider = thread.model_provider_id
+    pref_model = thread.model_name
+    if not pref_provider:
+        role_row = (
+            db.query(RoleModelAssignment)
+            .filter(
+                RoleModelAssignment.workspace_id == thread.workspace_id,
+                RoleModelAssignment.role_key == "coding_planner",
+            )
+            .first()
+        )
+        if role_row and role_row.provider_id:
+            pref_provider = role_row.provider_id
+            pref_model = pref_model or role_row.model
+
+    if not pref_provider or pref_provider == "mock-local":
         return None
-    prov = db.get(Provider, thread.model_provider_id)
+    prov = db.get(Provider, pref_provider)
     if not prov or not prov.enabled or prov.kind == "llm-mock":
         return None
     try:
         res = LLMRouter(db, thread.workspace_id).route(
-            task_type="coding_plan",
+            task_type="coding_planner",
             tier="mid",
             prompt=f"اكتب ملخص خطة تنفيذ هندسية موجزة (4 نقاط بالعربية) للمهمة التالية:\n{prompt}",
             system_prompt=thread.system_prompt_snapshot or SYSTEM_PROMPT_TEMPLATE,
-            preferred_provider=thread.model_provider_id,
+            preferred_provider=pref_provider,
+            preferred_model=pref_model,
             allow_mock_fallback=False,
         )
         out = str(res.get("output") or "").strip()

@@ -24,6 +24,16 @@ from app.services.llm_router import (
     seed_default_providers,
     upsert_agent_assignment,
 )
+from app.services.model_catalogue import (
+    AUTO_SYNC_PROVIDERS,
+    fetch_endpoint_models,
+    get_catalogue_page,
+    get_catalogue_summary,
+    get_role_models,
+    save_manual_slugs,
+    sync_provider_catalogue,
+    upsert_role_models,
+)
 from app.services.runtime_checks import is_local_endpoint
 from app.skills.registry import list_all_skills
 
@@ -64,6 +74,22 @@ class FetchModelsRequest(BaseModel):
     api_key: str | None = None
     protocol: str = "openai-completions"
     provider_id: str | None = None
+    persist_catalogue: bool = True
+
+
+class ManualSlugsRequest(BaseModel):
+    slugs: list[str] | None = None
+    slugs_text: str | None = None
+
+
+class ProviderTiersUpdateRequest(BaseModel):
+    cheap: str | None = None
+    mid: str | None = None
+    strong: str | None = None
+
+
+class RoleModelsUpdateRequest(BaseModel):
+    roles: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class ProviderAccountCreateRequest(BaseModel):
@@ -162,6 +188,7 @@ def list_providers(auth: AuthContext = Depends(get_current_auth), db: Session = 
                 "accounts_count": len(accts_by_prov.get(p.id, [])),
                 "accounts": accts_by_prov.get(p.id, []),
                 "config": p.config_json,
+                "catalogue": get_catalogue_summary(db, auth.workspace.id, p),
             }
             for p in rows
         ]
@@ -180,45 +207,18 @@ async def fetch_models_from_endpoint(
             status_code=400,
             detail={"code": "invalid_url", "message_ar": "رابط نقطة النهاية غير صالح", "message_en": "Invalid endpoint URL"},
         )
-    api_key = (req.api_key or "").strip() or None
-    if not api_key and req.provider_id:
-        key_row = (
-            db.query(ApiKey)
-            .filter(ApiKey.workspace_id == auth.workspace.id, ApiKey.provider == req.provider_id)
-            .first()
-        )
-        if key_row:
-            api_key = decrypt_secret(key_row.secret_enc)
-
-    headers: dict[str, str] = {"Accept": "application/json"}
-    if api_key:
-        if req.protocol == "anthropic":
-            headers["x-api-key"] = api_key
-            headers["anthropic-version"] = "2023-06-01"
-        else:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-    target_url = f"{base}/api/tags" if (req.protocol == "ollama" or ":11434" in base) and not base.endswith("/v1") else f"{base}/models"
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(target_url, headers=headers)
-            if resp.status_code >= 400:
-                return {"ok": False, "error": f"http_{resp.status_code}", "models": []}
-            body = resp.json()
-    except Exception as exc:
-        return {"ok": False, "error": type(exc).__name__, "models": []}
-
-    raw_items = body.get("data") or body.get("models") or (body if isinstance(body, list) else [])
-    parsed: list[dict[str, str]] = []
-    for item in raw_items:
-        if isinstance(item, dict):
-            mid = str(item.get("id") or item.get("name") or "").strip()
-            name = str(item.get("displayName") or item.get("name") or mid).strip()
-            if mid:
-                parsed.append({"id": mid, "name": name})
-        elif isinstance(item, str) and item.strip():
-            parsed.append({"id": item.strip(), "name": item.strip()})
-    return {"ok": True, "models": parsed}
+    result = await fetch_endpoint_models(
+        db,
+        workspace_id=auth.workspace.id,
+        api_base=base,
+        api_key=req.api_key,
+        protocol=req.protocol,
+        provider_id=req.provider_id,
+        persist_catalogue=req.persist_catalogue,
+    )
+    if req.persist_catalogue and req.provider_id:
+        db.commit()
+    return result
 
 
 @router.post("/api/providers")
@@ -306,7 +306,7 @@ def create_provider(
 
 
 @router.patch("/api/providers/{provider_id}")
-def patch_provider(
+async def patch_provider(
     provider_id: str,
     req: ProviderPatchRequest,
     request: Request,
@@ -317,6 +317,7 @@ def patch_provider(
     if not row or row.workspace_id != auth.workspace.id:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "المزود غير موجود", "message_en": "Provider not found"})
 
+    was_enabled = bool(row.enabled)
     if req.connect_type is not None:
         _validate_connect_type(req.connect_type)
         row.connect_type = req.connect_type
@@ -360,8 +361,121 @@ def patch_provider(
         target=row.id,
         ip=request.client.host if request.client else None,
     )
+    db.flush()
+
+    turning_on = (req.enabled is True) and not was_enabled
+    if row.id in AUTO_SYNC_PROVIDERS and row.enabled and (turning_on or bool(req.api_key)):
+        await sync_provider_catalogue(db, auth.workspace.id, row)
+
     db.commit()
-    return {"id": row.id, "enabled": row.enabled, "budget_usd_daily": row.budget_usd_daily}
+    return {
+        "id": row.id,
+        "enabled": row.enabled,
+        "budget_usd_daily": row.budget_usd_daily,
+        "catalogue": get_catalogue_summary(db, auth.workspace.id, row),
+    }
+
+
+@router.get("/api/providers/{provider_id}/catalogue")
+def get_provider_catalogue(
+    provider_id: str,
+    q: str = "",
+    family: str = "",
+    page: int = 1,
+    page_size: int = 50,
+    auth: AuthContext = Depends(get_current_auth),
+    db: Session = Depends(get_db),
+):
+    prov = db.get(Provider, provider_id)
+    if not prov or prov.workspace_id != auth.workspace.id:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "المزود غير موجود", "message_en": "Provider not found"})
+    return get_catalogue_page(db, workspace_id=auth.workspace.id, provider=prov, q=q, family=family, page=page, page_size=page_size)
+
+
+@router.post("/api/providers/{provider_id}/catalogue/refresh")
+async def refresh_provider_catalogue(
+    provider_id: str,
+    auth: AuthContext = Depends(require_roles("owner", "admin")),
+    db: Session = Depends(get_db),
+):
+    prov = db.get(Provider, provider_id)
+    if not prov or prov.workspace_id != auth.workspace.id:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "المزود غير موجود", "message_en": "Provider not found"})
+    res = await sync_provider_catalogue(db, auth.workspace.id, prov)
+    db.commit()
+    return res
+
+
+@router.put("/api/providers/{provider_id}/catalogue/manual-slugs")
+def update_provider_manual_slugs(
+    provider_id: str,
+    req: ManualSlugsRequest,
+    auth: AuthContext = Depends(require_roles("owner", "admin")),
+    db: Session = Depends(get_db),
+):
+    prov = db.get(Provider, provider_id)
+    if not prov or prov.workspace_id != auth.workspace.id:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "المزود غير موجود", "message_en": "Provider not found"})
+    slugs = list(req.slugs or [])
+    if req.slugs_text is not None:
+        slugs.extend([ln.strip() for ln in req.slugs_text.splitlines() if ln.strip()])
+    summary = save_manual_slugs(db, workspace_id=auth.workspace.id, provider=prov, slugs=slugs)
+    db.commit()
+    return {"provider_id": prov.id, "catalogue": summary}
+
+
+@router.put("/api/providers/{provider_id}/tiers")
+def update_provider_tiers(
+    provider_id: str,
+    req: ProviderTiersUpdateRequest,
+    auth: AuthContext = Depends(require_roles("owner", "admin")),
+    db: Session = Depends(get_db),
+):
+    prov = db.get(Provider, provider_id)
+    if not prov or prov.workspace_id != auth.workspace.id:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "المزود غير موجود", "message_en": "Provider not found"})
+    updated = dict(prov.models_json or {})
+    for tier in ("cheap", "mid", "strong"):
+        val = getattr(req, tier)
+        if val is not None:
+            clean = val.strip()
+            updated[tier] = clean or ("auto" if prov.id == "freellmapi" else updated.get(tier, ""))
+    prov.models_json = updated
+    db.commit()
+    return {"provider_id": prov.id, "models": prov.models_json}
+
+
+@router.get("/api/settings/role-models")
+def get_role_models_endpoint(auth: AuthContext = Depends(get_current_auth), db: Session = Depends(get_db)):
+    seed_default_providers(db, auth.workspace.id)
+    db.commit()
+    return {"roles": get_role_models(db, auth.workspace.id)}
+
+
+@router.put("/api/settings/role-models")
+def update_role_models_endpoint(
+    req: RoleModelsUpdateRequest,
+    auth: AuthContext = Depends(require_roles("owner", "admin")),
+    db: Session = Depends(get_db),
+):
+    try:
+        out = upsert_role_models(db, auth.workspace.id, req.roles)
+        db.commit()
+        return {"roles": out}
+    except ReviewerProviderConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "reviewer_provider_conflict",
+                "message_ar": "يجب أن يختلف مزود المراجعة عن مزود التنسيق والتنفيذ",
+                "message_en": str(exc),
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "invalid_role", "message_ar": str(exc), "message_en": str(exc)},
+        ) from exc
 
 
 @router.get("/api/providers/{provider_id}/accounts")

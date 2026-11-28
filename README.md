@@ -28,6 +28,7 @@
   - JavaScript / Node 18+ (fetch مدمج): `sdk/js/uas_sdk.mjs` (`UnifiedAgentSDK`)
 - **موصلات النماذج المحلية المجمّعة (معطّلة افتراضياً ومفلترة تلقائياً في الإنتاج `ENV=production`):**
   - `freellmapi` (`http://localhost:3001/v1`) و `free-claude-code` (`http://127.0.0.1:8082/v1`) بشارة `"محلي فقط" / "Local only"`.
+  - **كتالوج الموديلات المجانية (Phase 4):** جلب وتخزين الكتالوج الكامل (`provider_models`) تلقائياً عند إضافة المفتاح أو التفعيل أو يومياً في الخلفية، مع واجهة بحث وترقيم صفحات (25 موديلاً/صفحة)، حالة فاضية صادقة عند عدم وجود مفاتيح في FreeLLMAPI، بديل إدخال Slugs يدوياً لـ FCC إذا لم يعرّض `/v1/models`، وتخصيص الموديل لكل مستوى ولكل دور (`orchestrator / worker / reviewer / coding_*`) مع إبقاء `auto` افتراضياً.
 - **تصدير الحسابات المنشأة محلياً:** ملف `data/accounts.xlsx` (مستثنى عبر `.gitignore`) مع تحميله عبر `/api/backlinks/accounts/spreadsheet`.
 
 ---

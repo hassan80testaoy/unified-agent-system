@@ -30,9 +30,11 @@ export default function AgentDetailPage() {
   const [providers, setProviders] = useState<ProviderRow[]>([]);
   const [orchProvider, setOrchProvider] = useState("mock-local");
   const [orchTier, setOrchTier] = useState("strong");
+  const [orchModel, setOrchModel] = useState("auto");
   const [revProvider, setRevProvider] = useState("ollama-local");
   const [revTier, setRevTier] = useState("mid");
-  const [workers, setWorkers] = useState<Record<string, { provider: string; tier: string }>>({});
+  const [revModel, setRevModel] = useState("auto");
+  const [workers, setWorkers] = useState<Record<string, { provider: string; tier: string; model?: string }>>({});
   const [dailyLimit, setDailyLimit] = useState(100);
   const [dailyBudget, setDailyBudget] = useState(3.0);
   const [msg, setMsg] = useState("");
@@ -43,9 +45,9 @@ export default function AgentDetailPage() {
       apiFetch<{
         agent: typeof agent;
         delegation: {
-          orchestrator: { provider?: string; tier?: string };
-          workers: Record<string, { provider: string; tier: string }>;
-          reviewer: { provider?: string; tier?: string };
+          orchestrator: { provider?: string; tier?: string; model?: string };
+          workers: Record<string, { provider: string; tier: string; model?: string }>;
+          reviewer: { provider?: string; tier?: string; model?: string };
         };
       }>(`/api/agents/${params.id}`),
       apiFetch<{ providers: ProviderRow[] }>("/api/providers"),
@@ -57,8 +59,10 @@ export default function AgentDetailPage() {
       }
       setOrchProvider(det.delegation.orchestrator?.provider || "mock-local");
       setOrchTier(det.delegation.orchestrator?.tier || "strong");
+      setOrchModel(det.delegation.orchestrator?.model || "auto");
       setRevProvider(det.delegation.reviewer?.provider || "ollama-local");
       setRevTier(det.delegation.reviewer?.tier || "mid");
+      setRevModel(det.delegation.reviewer?.model || "auto");
       setWorkers(det.delegation.workers || {});
       setProviders(provs.providers.filter((p) => p.kind !== "captcha"));
     });
@@ -76,9 +80,9 @@ export default function AgentDetailPage() {
       await apiFetch(`/api/agents/${params.id}/providers`, {
         method: "PUT",
         body: JSON.stringify({
-          orchestrator: { provider: orchProvider, tier: orchTier },
+          orchestrator: { provider: orchProvider, tier: orchTier, model: orchModel || "auto" },
           workers,
-          reviewer: { provider: revProvider, tier: revTier },
+          reviewer: { provider: revProvider, tier: revTier, model: revModel || "auto" },
         }),
       });
       setMsg(locale === "ar" ? "تم حفظ إعدادات الوكيل وتوزيع المزودين بنجاح." : "Agent limits and provider delegation saved.");
@@ -136,7 +140,7 @@ export default function AgentDetailPage() {
               : "Using the same provider/model for Orchestrator and Workers is allowed; only Reviewer must come from a different provider."}
           </p>
 
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-3">
             <div>
               <label className="mb-1 block text-xs font-medium">{locale === "ar" ? "العقل المدبر (Orchestrator)" : "Orchestrator Provider"}</label>
               <select
@@ -163,12 +167,23 @@ export default function AgentDetailPage() {
                 <option value="cheap">cheap</option>
               </select>
             </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium">{locale === "ar" ? "الموديل (اختياري / auto)" : "Model (optional / auto)"}</label>
+              <input
+                type="text"
+                dir="ltr"
+                value={orchModel}
+                onChange={(e) => setOrchModel(e.target.value)}
+                placeholder="auto"
+                className="w-full rounded-lg border border-borderline bg-canvas px-3 py-2 text-end font-mono text-sm"
+              />
+            </div>
           </div>
 
           <div className="space-y-2">
             <div className="text-xs font-semibold text-muted">{locale === "ar" ? "العمال حسب نوع المهمة (Workers)" : "Workers by Task Type"}</div>
             {Object.entries(workers).map(([taskType, cfg]) => (
-              <div key={taskType} className="grid gap-2 rounded-lg border border-borderline bg-canvas p-3 sm:grid-cols-3">
+              <div key={taskType} className="grid gap-2 rounded-lg border border-borderline bg-canvas p-3 sm:grid-cols-4">
                 <div className="flex items-center font-mono text-xs font-semibold">{taskType}</div>
                 <select
                   value={cfg.provider}
@@ -194,11 +209,21 @@ export default function AgentDetailPage() {
                   <option value="mid">mid</option>
                   <option value="strong">strong</option>
                 </select>
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={cfg.model || "auto"}
+                  onChange={(e) =>
+                    setWorkers((prev) => ({ ...prev, [taskType]: { ...prev[taskType], model: e.target.value } }))
+                  }
+                  placeholder="auto"
+                  className="rounded border border-borderline bg-surface px-2 py-1.5 text-end font-mono text-xs"
+                />
               </div>
             ))}
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+          <div className="grid gap-3 sm:grid-cols-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
             <div>
               <label className="mb-1 block text-xs font-semibold">
                 {locale === "ar" ? "المراجع (يجب أن يختلف عن المنفّذ)" : "Reviewer (must differ from producer)"}
@@ -226,6 +251,17 @@ export default function AgentDetailPage() {
                 <option value="strong">strong</option>
                 <option value="cheap">cheap</option>
               </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold">{locale === "ar" ? "موديل المراجع" : "Reviewer Model"}</label>
+              <input
+                type="text"
+                dir="ltr"
+                value={revModel}
+                onChange={(e) => setRevModel(e.target.value)}
+                placeholder="auto"
+                className="w-full rounded-lg border border-borderline bg-surface px-3 py-2 text-end font-mono text-sm"
+              />
             </div>
           </div>
         </div>

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base, PortableJSON, TimestampMixin, new_uuid, utcnow
@@ -114,3 +114,38 @@ class ProviderAccount(Base, TimestampMixin):
     quota_limit: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     last_failover_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failover_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class ProviderModel(Base):
+    """Full fetched or manually configured model catalogue entries per provider & workspace."""
+
+    __tablename__ = "provider_models"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "provider_id", "model_id", name="uq_provider_models_ws_prov_mid"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False, index=True)
+    provider_id: Mapped[str] = mapped_column(String(64), ForeignKey("providers.id"), nullable=False, index=True)
+    model_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    family: Mapped[str] = mapped_column(String(128), default="", nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(32), default="fetched", nullable=False)  # fetched|manual
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(PortableJSON, default=dict, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class RoleModelAssignment(Base, TimestampMixin):
+    """Workspace-wide provider + model assignment per role (orchestrator/worker/reviewer/coding_*)."""
+
+    __tablename__ = "role_model_assignments"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "role_key", name="uq_role_model_ws_role"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False, index=True)
+    role_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    provider_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("providers.id"), nullable=True)
+    tier: Mapped[str] = mapped_column(String(16), default="mid", nullable=False)
+    model: Mapped[str] = mapped_column(String(255), default="auto", nullable=False)
