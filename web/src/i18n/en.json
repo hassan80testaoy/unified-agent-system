@@ -2,6 +2,7 @@
   "app_name": "Unified Agent System",
   "app_tagline": "Self-hosted Personal AI Agents + SEO & Backlinks",
   "nav": {
+    "chat": "Chat",
     "dashboard": "Dashboard",
     "agents": "Agents",
     "new_task": "New Task",
@@ -124,5 +125,35 @@
     "code_prompt_title": "Verification Code Requested (Single-use, never stored)",
     "code_input_placeholder": "Enter 6-8 digit verification code",
     "submit_code": "Submit Code Once"
+  },
+  "chat": {
+    "title": "General Agent — Ask or Delegate Anything",
+    "new_thread": "New Chat",
+    "placeholder": "Type your request in Arabic or English... (e.g. Backlink on site X, check my inbox, cheapest flights)",
+    "send": "Send",
+    "compact": "Compact",
+    "undo": "Undo Turn",
+    "mode_label": "Mode",
+    "approval_label": "Approvals",
+    "intent_label": "Intent"
+  },
+  "modes": {
+    "title": "Agent Modes",
+    "default_badge": "Default",
+    "set_default": "Set Default",
+    "create_title": "Create Custom Mode"
+  },
+  "providers_ui": {
+    "add_provider": "Add Provider",
+    "fetch_models": "Fetch Models from Endpoint",
+    "failover": "Rotate Account (Failover)",
+    "add_account": "Add Account / Key",
+    "connect_signin": "Sign in with account",
+    "connect_api_key": "API Key",
+    "connect_custom": "Custom Endpoint"
+  },
+  "replay": {
+    "title": "Session Replay",
+    "no_session": "No recorded session yet"
   }
 }

@@ -60,6 +60,29 @@ class Settings(BaseSettings):
     captcha_max_spend_usd: float = 0.0
     captcha_manual_timeout_sec: int = 900
 
+    # Captcha plugin pack (OPT-IN — خارج قاعدة Human-in-the-Loop في AGENTS.md، التركيب قرارك).
+    # المفاتيح دي تتحط هنا على جهازك بس، وممنوع تتكتب في الشات أو تتكوميت في git.
+    # CAPTCHA_SOLVER=chain  # جرّب بالترتيب: passxapi (مجاني) ثم capmonster ثم capsolver ثم 2captcha ثم anticaptcha ثم يدوي
+    # CAPTCHA_SOLVER_CHAIN=passxapi,capmonster,capsolver,2captcha,anticaptcha
+    # PASSXAPI_API_KEY=
+    # TWOCAPTCHA_API_KEY=
+    # ANTICAPTCHA_API_KEY=
+    # CAPSOLVER_API_KEY=
+    # CAPMONSTER_API_KEY=
+    # RESIDENTIAL_PROXY=http://user:pass@residential.proxy:8080  # لازم يطابق IP المتصفح
+    # CAPTCHA_MAX_SPEND_USD=0  # 0 = رصيد مجاني فقط + يدوي. حط ميزانية (مثلاً 5) عشان المزودين المدفوعين يشتغلوا.
+
+    # Captcha plugin pack (OPT-IN, owner-installed — conflicts with AGENTS.md rule 2).
+    # Keys are read from env; empty = provider disabled. Never commit a real key.
+    passxapi_api_key: str = ""
+    twocaptcha_api_key: str = ""
+    anticaptcha_api_key: str = ""
+    capsolver_api_key: str = ""
+    capmonster_api_key: str = ""
+    captcha_solver_chain: str = "passxapi,capmonster,capsolver,2captcha,anticaptcha"
+    residential_proxy: str = ""  # e.g. Scrape.do Proxy Mode: http://TOKEN:super=true@pm.scrape.do:8080
+    captcha_plugin_dir: str = ""  # sibling folder with the solver plugins (stealth mode); .env alone is enough
+
     # Mail & Google Account OAuth
     mail_mode: str = "imap"
     google_oauth_client_id: str = ""
@@ -119,10 +142,34 @@ def load_yaml_config(filename: str) -> dict[str, Any]:
 
 
 def get_env_secret_by_ref(auth_ref: str) -> str | None:
-    """Resolve `env:VAR_NAME` references without storing plaintext keys in config files."""
+    """Resolve `env:VAR_NAME` references from process env or repo `.env` without storing plaintext keys in config."""
     if not auth_ref or auth_ref == "none":
         return None
     if auth_ref.startswith("env:"):
         var_name = auth_ref.split(":", 1)[1].strip()
-        return os.environ.get(var_name) or None
+        env_val = os.environ.get(var_name)
+        if env_val and env_val.strip():
+            return env_val.strip()
+        # In unit/integration tests, never pull real user `.env` secrets automatically
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return None
+        settings = get_settings()
+        attr_val = getattr(settings, var_name.lower(), None)
+        if isinstance(attr_val, str) and attr_val.strip():
+            return attr_val.strip()
+        env_file = _resolve_repo_env()
+        if env_file:
+            try:
+                for raw_line in Path(env_file).read_text(encoding="utf-8").splitlines():
+                    line = raw_line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    if k.strip() == var_name:
+                        cleaned = v.strip().strip('"').strip("'").strip()
+                        if cleaned:
+                            return cleaned
+            except OSError:
+                pass
+        return None
     return None

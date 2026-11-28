@@ -18,6 +18,9 @@ class Provider(Base, TimestampMixin):
     workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     kind: Mapped[str] = mapped_column(String(24), default="llm", nullable=False)  # llm|llm-local|llm-mock|captcha
+    connect_type: Mapped[str] = mapped_column(String(24), default="api_key", nullable=False)  # signin|api_key|custom_endpoint
+    protocol: Mapped[str] = mapped_column(String(32), default="openai-completions", nullable=False)  # openai-completions|openai-responses|anthropic|gemini|ollama|custom
+    path_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     api_base: Mapped[str] = mapped_column(String(255), nullable=False)
     auth_ref: Mapped[str] = mapped_column(String(128), default="none", nullable=False)
     models_json: Mapped[dict[str, str]] = mapped_column(PortableJSON, default=dict, nullable=False)
@@ -92,3 +95,22 @@ class Connection(Base, TimestampMixin):
     kind: Mapped[str] = mapped_column(String(32), nullable=False)  # gsc|wordpress|ga4|sheets|telegram
     config_enc: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="active", nullable=False)
+
+
+class ProviderAccount(Base, TimestampMixin):
+    """Multiple accounts/keys per provider supporting automatic priority failover."""
+    __tablename__ = "provider_accounts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False, index=True)
+    provider_id: Mapped[str] = mapped_column(String(64), ForeignKey("providers.id"), nullable=False, index=True)
+    label: Mapped[str] = mapped_column(String(128), nullable=False)
+    auth_type: Mapped[str] = mapped_column(String(24), default="api_key", nullable=False)  # api_key|oauth_signin|cli_login
+    key_ref_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last4: Mapped[str] = mapped_column(String(8), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="active", nullable=False)  # active|resting|disabled
+    priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    quota_used: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    quota_limit: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    last_failover_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failover_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)

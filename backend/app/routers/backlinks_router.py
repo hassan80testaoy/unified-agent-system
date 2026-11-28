@@ -22,6 +22,7 @@ from app.models.backlinks import (
     BlStep,
     BlTarget,
 )
+from app.models.v3_harness import BlSession
 from app.security.auth import AuthContext, get_current_auth, record_audit, require_roles, verify_totp_code
 from app.security.crypto import decrypt_secret
 from app.services.importer import (
@@ -30,6 +31,7 @@ from app.services.importer import (
     import_steps_json,
     preview_import,
 )
+from app.services.session_replay import get_replay_stats_by_domain
 
 router = APIRouter(tags=["backlinks"])
 
@@ -86,6 +88,7 @@ def list_sites(
     if status_filter:
         q = q.filter(BlSite.status == status_filter)
     rows = q.order_by(BlSite.source_row.asc(), BlSite.created_at.desc()).limit(1000).all()
+    replay_map = get_replay_stats_by_domain(db, auth.workspace.id)
     return {
         "sites": [
             {
@@ -99,9 +102,74 @@ def list_sites(
                 "status": s.status,
                 "blocked_reason": s.blocked_reason,
                 "last_attempt_at": s.last_attempt_at,
+                "replay_stats": replay_map.get(s.domain.lower()),
             }
             for s in rows
         ]
+    }
+
+
+@router.get("/api/backlinks/sessions")
+def list_backlink_sessions(
+    auth: AuthContext = Depends(get_current_auth),
+    db: Session = Depends(get_db),
+):
+    stats = get_replay_stats_by_domain(db, auth.workspace.id)
+    rows = (
+        db.query(BlSession)
+        .filter(BlSession.workspace_id == auth.workspace.id)
+        .order_by(BlSession.created_at.desc())
+        .limit(200)
+        .all()
+    )
+    return {
+        "stats": list(stats.values()),
+        "sessions": [
+            {
+                "id": r.id,
+                "domain": r.domain,
+                "version": r.version,
+                "steps_count": len(r.steps_json or []),
+                "replay_count": r.replay_count,
+                "saved_steps_total": r.saved_steps_total,
+                "saved_llm_calls_total": r.saved_llm_calls_total,
+                "last_replay_at": r.last_replay_at.isoformat() if r.last_replay_at else None,
+                "playbook_path": r.playbook_path,
+                "status": r.status,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/api/backlinks/sessions/{domain}")
+def get_domain_replay_sessions(
+    domain: str,
+    auth: AuthContext = Depends(get_current_auth),
+    db: Session = Depends(get_db),
+):
+    norm = domain.strip().lower()
+    rows = (
+        db.query(BlSession)
+        .filter(BlSession.workspace_id == auth.workspace.id, BlSession.domain == norm)
+        .order_by(BlSession.version.desc())
+        .all()
+    )
+    return {
+        "domain": norm,
+        "versions": [
+            {
+                "id": r.id,
+                "version": r.version,
+                "steps": r.steps_json,
+                "replay_count": r.replay_count,
+                "saved_steps_total": r.saved_steps_total,
+                "saved_llm_calls_total": r.saved_llm_calls_total,
+                "playbook_path": r.playbook_path,
+                "last_replay_at": r.last_replay_at.isoformat() if r.last_replay_at else None,
+            }
+            for r in rows
+        ],
     }
 
 

@@ -51,6 +51,14 @@ from app.models.providers import (
     LlmCall,
     ModelRoute,
     Provider,
+    ProviderAccount,
+)
+from app.models.v3_harness import (
+    BlSession,
+    ChatMessage,
+    ChatThread,
+    ModePreset,
+    ProjectMode,
 )
 from app.models.seo import (
     ContactLog,
@@ -81,6 +89,7 @@ __all__ = [
     "Report",
     "AgentMemory",
     "Provider",
+    "ProviderAccount",
     "AgentProviderAssignment",
     "ModelRoute",
     "LlmCall",
@@ -112,4 +121,9 @@ __all__ = [
     "WakeSubscription",
     "ProactiveReport",
     "I2IBundle",
+    "ModePreset",
+    "ProjectMode",
+    "BlSession",
+    "ChatThread",
+    "ChatMessage",
 ]

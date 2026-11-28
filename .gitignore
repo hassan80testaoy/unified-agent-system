@@ -19,10 +19,13 @@ venv/
 
 # Database & local data
 data/
+accounts.xlsx
+**/accounts.xlsx
 backups/
 *.db
 *.sqlite
 *.sqlite3
+*.bak
 
 # Node / Next.js
 web/node_modules/
@@ -39,3 +42,7 @@ Thumbs.db
 
 # AEO working files (kept local per session)
 .aeo/
+
+# Reference repositories (keep SOURCES.md only)
+references/*
+!references/SOURCES.md
