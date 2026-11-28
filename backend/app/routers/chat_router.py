@@ -13,6 +13,7 @@ from app.models.v3_harness import ChatMessage, ChatThread
 from app.security.auth import AuthContext, get_current_auth, record_audit, require_roles
 from app.services.chat_agent import compact_thread, create_thread, process_user_message, undo_thread
 from app.services.events import ws_hub
+from app.services.runtime_checks import get_runtime_readiness
 from app.services.session_log import read_log
 
 router = APIRouter(tags=["chat"])
@@ -33,7 +34,7 @@ class ThreadPatchRequest(BaseModel):
 
 class ChatMessageCreateRequest(BaseModel):
     content: str = Field(min_length=1, max_length=16000)
-    mock_mode: bool = True
+    mock_mode: bool | None = None
     simulate_captcha: bool = False
     simulate_2fa: bool = False
 
@@ -155,12 +156,17 @@ async def send_chat_message(
     t = db.get(ChatThread, thread_id)
     if not t or t.workspace_id != auth.workspace.id:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "المحادثة غير موجودة", "message_en": "Thread not found"})
+    resolved_mock = (
+        bool(get_runtime_readiness(db, auth.workspace.id)["default_mock_mode"])
+        if req.mock_mode is None
+        else bool(req.mock_mode)
+    )
     return await process_user_message(
         db,
         thread=t,
         user_id=auth.user.id,
         content=req.content,
-        mock_mode=req.mock_mode,
+        mock_mode=resolved_mock,
         simulate_captcha=req.simulate_captcha,
         simulate_2fa=req.simulate_2fa,
     )

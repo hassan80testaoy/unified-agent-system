@@ -23,6 +23,8 @@ from app.models.backlinks import (
 )
 from app.models.google_account import GoogleAccount
 from app.security.sanitizer import scrub_text
+from app.services.accounts_sheet import record_account_in_spreadsheet
+from app.services.runtime_checks import get_runtime_readiness, validate_real_email
 from app.services.session_replay import replay_backlink_session, save_backlink_session
 from app.services.captcha_inject import inject_token_via_worker
 from app.services.vault import create_server_generated_site_password
@@ -55,7 +57,35 @@ async def run_flagship_backlink_loop(
     stages: list[dict[str, Any]] = []
 
     def _stage(num: int, name: str, status: str, detail: str) -> None:
-        stages.append({"step": num, "name": name, "status": status, "detail": scrub_text(detail)})
+        clean_detail = scrub_text(detail)
+        if mock_mode and not clean_detail.startswith("محاكاة"):
+            clean_detail = f"محاكاة — {clean_detail}"
+        stages.append({"step": num, "name": name, "status": status, "detail": clean_detail})
+
+    ok_email, email_err = validate_real_email(email)
+    if not ok_email:
+        return {
+            "status": "invalid_email",
+            "failed_step": 0,
+            "domain": clean_domain,
+            "is_mock": bool(mock_mode),
+            "report_ar": email_err or "يرجى إدخال بريد إلكتروني حقيقي قبل التشغيل.",
+            "stages": stages,
+        }
+
+    if not mock_mode:
+        readiness = get_runtime_readiness(db, workspace_id)
+        if not readiness["real_backlink_ready"]:
+            missing_list = "\n- ".join(readiness["missing_for_real_backlink"])
+            return {
+                "status": "missing_requirements",
+                "failed_step": 0,
+                "domain": clean_domain,
+                "is_mock": False,
+                "missing": readiness["missing_keys"],
+                "report_ar": f"لا يمكن بدء التشغيل الحقيقي قبل استكمال المتطلبات التالية:\n- {missing_list}",
+                "stages": stages,
+            }
 
     # 1. OPEN
     site = (
@@ -114,8 +144,8 @@ async def run_flagship_backlink_loop(
     signup_method = "google_signin" if (g_acct and clean_domain.endswith(".com") and False) else "email_form"
     _stage(2, "find_signup", "ok", f"اكتشاف مسار التسجيل ({signup_method})")
 
-    # 3. REGISTER (Vault password ONLY — never stored plaintext in chat/steps/sessions)
-    _, site_pw_enc = create_server_generated_site_password()
+    # 3. REGISTER (Vault password ONLY — never stored plaintext in chat/steps/logs)
+    raw_pw, site_pw_enc = create_server_generated_site_password()
     username = f"moaaz_seo_{clean_domain.split('.')[0][:10]}"
     account = BlAccount(
         workspace_id=workspace_id,
@@ -128,6 +158,15 @@ async def run_flagship_backlink_loop(
     )
     db.add(account)
     db.flush()
+    record_account_in_spreadsheet(
+        domain=clean_domain,
+        email_username=email.strip(),
+        password=raw_pw,
+        profile_url="",
+        notes="simulation" if mock_mode else "live",
+    )
+    raw_pw = ""
+    del raw_pw
 
     steps_payload = [
         {"n": 1, "action": "goto", "selector_css": None, "value_key": "signup_url", "ok": 1},
@@ -263,6 +302,13 @@ async def run_flagship_backlink_loop(
     profile_url = f"mock://{clean_domain}/u/{username}" if mock_mode else f"https://{clean_domain}/{username}"
     account.profile_url = profile_url
     account.verified_at = now_iso
+    record_account_in_spreadsheet(
+        domain=clean_domain,
+        email_username=email.strip(),
+        password="",
+        profile_url=profile_url,
+        notes="simulation" if mock_mode else "live",
+    )
     if mock_mode:
         link_type = "dofollow"
         is_live = 1
@@ -295,24 +341,33 @@ async def run_flagship_backlink_loop(
             "status": "not_found_on_profile",
             "failed_step": 8,
             "domain": clean_domain,
+            "is_mock": bool(mock_mode),
             "profile_url": profile_url,
             "report_ar": f"فشل في خطوة 8: الحساب مسجل لكن الرابط غير ظاهر في الصفحة العامة ({profile_url}).",
             "stages": stages,
             "replay": replay_info,
         }
 
-    _stage(8, "verify", "ok", f"تم التحقق من الصفحة العامة ({profile_url}) — {link_type}")
+    if mock_mode:
+        _stage(8, "verify", "ok", f"فحص تجريبي فقط ({profile_url} — محاكاة، ليس رابطاً حياً)")
+        report_ar = (
+            f"محاكاة — لو كان هذا تشغيلاً حقيقياً على موقع {clean_domain}: سيتم تسجيل الحساب، "
+            f"وتفعيل البريد، وفحص الرابط ({profile_url} — محاكاة، ليس رابطاً حياً). لم يتم إنشاء حساب حقيقي ولا رابط حي."
+        )
+    else:
+        _stage(8, "verify", "ok", f"تم التحقق من الصفحة العامة ({profile_url}) — {link_type}")
+        report_ar = (
+            f"تم ✅ — موقع {clean_domain}: حساب مسجل، إيميل مفعل، الباك لينك live ({link_type}) — {profile_url}"
+        )
 
-    # 9. REPORT
-    report_ar = (
-        f"تم ✅ — موقع {clean_domain}: حساب مسجل، إيميل مفعل، الباك لينك live ({link_type}) — {profile_url}"
-    )
     _stage(9, "report", "ok", report_ar)
     return {
         "status": "done",
         "domain": clean_domain,
         "account_id": account.id,
-        "profile_url": profile_url,
+        "is_mock": bool(mock_mode),
+        "simulated": bool(mock_mode),
+        "profile_url": profile_url if not mock_mode else f"{profile_url} (محاكاة، ليس رابطاً حياً)",
         "link_type": link_type,
         "report_ar": report_ar,
         "stages": stages,

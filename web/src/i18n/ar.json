@@ -4,6 +4,7 @@
   "nav": {
     "chat": "المحادثة",
     "dashboard": "لوحة التحكم",
+    "coding_agent": "وكيل البرمجة",
     "agents": "الوكلاء",
     "new_task": "مهمة جديدة",
     "runs": "التشغيلات",
@@ -155,5 +156,34 @@
   "replay": {
     "title": "إعادة التشغيل الذكية",
     "no_session": "لا توجد جلسة مسجلة بعد"
+  },
+  "coding": {
+    "title": "وكيل البرمجة الذكي",
+    "subtitle": "الخطة أولاً، لقطات التراجع على القرص، عزل Git Worktree، سباق النماذج، والتحقق في المتصفح الحقيقي",
+    "new_thread": "مهمة برمجة جديدة",
+    "thread_title_ph": "عنوان المهمة (مثلاً: بناء مدير مهام عربي)",
+    "create_thread": "إنشاء مهمة",
+    "parallel_cap": "التشغيل المتوازي",
+    "tab_live": "المحادثة والتنفيذ",
+    "tab_changes": "التعديلات والـ Diff",
+    "tab_browser": "المتصفح واللقطات",
+    "tab_context": "السياق",
+    "tab_prompt": "برومبت النظام",
+    "tab_agents": "السباق والوكلاء",
+    "plan_review": "مراجعة الخطة والتصاميم المتجاوبة",
+    "approve_execute": "موافقة وتنفيذ",
+    "bypass_hint": "أو اكتب «نفذ مباشرة» لتخطي الخطة",
+    "send_prompt": "إرسال",
+    "prompt_ph": "اكتب طلب البرمجة أو /goal <الهدف> أو «نفذ مباشرة»...",
+    "todo_title": "قائمة المهام الحية",
+    "save_todo": "حفظ المهام",
+    "undo_here": "تراجع إلى هنا (القرص + المحادثة)",
+    "fork_here": "تفرّع في Worktree",
+    "create_worktree": "إنشاء Git Worktree",
+    "merge_worktree": "دمج Worktree بضغطة واحدة",
+    "run_race": "تشغيل سباق النماذج",
+    "spawn_subagent": "إطلاق وكيل فرعي",
+    "goals_title": "الأهداف المستقلة (Autopilot)",
+    "hooks_title": "قواعد الحماية والربط (Hooks)"
   }
 }

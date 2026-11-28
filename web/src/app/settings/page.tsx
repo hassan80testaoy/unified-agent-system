@@ -26,6 +26,7 @@ interface ProviderItem {
   protocol?: string;
   path_id?: string | null;
   api_base: string;
+  local_only?: boolean;
   budget_usd_daily: number;
   budget_usd_monthly: number;
   enabled: boolean;
@@ -498,8 +499,15 @@ export default function SettingsPage() {
             <div key={p.id} className="space-y-2 rounded-lg border border-borderline bg-canvas p-3 text-xs">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <div className="font-bold">
-                    {p.name} (<bdi dir="ltr" className="font-mono">{p.id}</bdi>)
+                  <div className="flex flex-wrap items-center gap-2 font-bold">
+                    <span>
+                      {p.name} (<bdi dir="ltr" className="font-mono">{p.id}</bdi>)
+                    </span>
+                    {p.local_only && (
+                      <span className="rounded bg-info/15 px-1.5 py-0.5 text-[10px] font-semibold text-info">
+                        {locale === "ar" ? "محلي فقط" : "Local only"}
+                      </span>
+                    )}
                   </div>
                   <div className="text-muted">
                     {p.connect_type || "api_key"} · {p.protocol || "openai-completions"} · daily cap: ${p.budget_usd_daily} ·{" "}

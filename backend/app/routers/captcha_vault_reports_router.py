@@ -28,6 +28,7 @@ from app.security.auth import AuthContext, get_current_auth, record_audit, requi
 from app.security.crypto import decrypt_secret, encrypt_secret, mask_last4
 from app.security.killswitch import activate_killswitch, deactivate_killswitch, get_killswitch_status
 from app.services.reports import compute_real_metrics, generate_report, render_report_printable_html
+from app.services.runtime_checks import get_runtime_readiness
 from app.services.vault import create_vault_request, get_vault_request_status, submit_vault_request
 
 router = APIRouter(tags=["captcha_vault_reports"])
@@ -531,3 +532,8 @@ def health_check():
         "captcha_solver": settings.captcha_solver,
         "captcha_max_spend_usd": settings.captcha_max_spend_usd,
     }
+
+
+@router.get("/api/system/runtime-status")
+def system_runtime_status(auth: AuthContext = Depends(get_current_auth), db: Session = Depends(get_db)):
+    return get_runtime_readiness(db, auth.workspace.id)

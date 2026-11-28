@@ -53,6 +53,8 @@ export default function ChatHomePage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState("");
+  const [mockMode, setMockMode] = useState(false);
+  const [runtimeReady, setRuntimeReady] = useState<{ default_mock_mode: boolean; missing_for_real_backlink?: string[] } | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
 
   const loadThreads = async () => {
@@ -77,9 +79,20 @@ export default function ChatHomePage() {
     }
   };
 
+  const loadRuntimeStatus = async () => {
+    const rs = await apiFetch<{ default_mock_mode: boolean; missing_for_real_backlink?: string[] }>(
+      "/api/system/runtime-status"
+    ).catch(() => null);
+    if (rs) {
+      setRuntimeReady(rs);
+      setMockMode(Boolean(rs.default_mock_mode));
+    }
+  };
+
   useEffect(() => {
     loadThreads();
     loadModes();
+    loadRuntimeStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -142,7 +155,7 @@ export default function ChatHomePage() {
       if (!textOverride) setInput("");
       await apiFetch(`/api/chat/threads/${tid}/messages`, {
         method: "POST",
-        body: JSON.stringify({ content: text, mock_mode: true }),
+        body: JSON.stringify({ content: text, mock_mode: mockMode }),
       });
       await loadThreads();
       await loadThreadDetail(tid);
@@ -291,6 +304,27 @@ export default function ChatHomePage() {
 
             <button
               type="button"
+              onClick={() => setMockMode((v) => !v)}
+              data-testid="execution-mode-toggle"
+              className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 font-semibold ${
+                mockMode
+                  ? "border-warning bg-amber-500/15 text-warning"
+                  : "border-success bg-success/15 text-success"
+              }`}
+            >
+              <span>
+                {mockMode
+                  ? locale === "ar"
+                    ? "وضع محاكاة (Simulation)"
+                    : "Simulation Mode"
+                  : locale === "ar"
+                  ? "وضع حقيقي (Real)"
+                  : "Real Mode"}
+              </span>
+            </button>
+
+            <button
+              type="button"
               onClick={handleCompact}
               disabled={!activeId}
               className="inline-flex items-center gap-1 rounded-lg border border-borderline bg-canvas px-2.5 py-1 hover:border-primary disabled:opacity-40"
@@ -310,6 +344,17 @@ export default function ChatHomePage() {
             </button>
           </div>
         </div>
+
+        {mockMode && (
+          <div className="border-b border-warning/40 bg-amber-500/10 px-4 py-2 text-xs font-semibold text-warning">
+            وضع محاكاة — لا يتم إنشاء حسابات حقيقية ولا روابط حية
+            {runtimeReady?.missing_for_real_backlink && runtimeReady.missing_for_real_backlink.length > 0 && (
+              <span className="ms-2 font-normal text-muted">
+                ({runtimeReady.missing_for_real_backlink.join(" · ")})
+              </span>
+            )}
+          </div>
+        )}
 
         {notice && (
           <div className="border-b border-borderline bg-primary/5 px-4 py-2 text-xs text-primary">{notice}</div>

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,7 @@ from app.models.backlinks import (
 from app.models.v3_harness import BlSession
 from app.security.auth import AuthContext, get_current_auth, record_audit, require_roles, verify_totp_code
 from app.security.crypto import decrypt_secret
+from app.services.accounts_sheet import get_accounts_spreadsheet_path
 from app.services.importer import (
     commit_sites_import,
     export_backlinks_csv,
@@ -193,6 +195,40 @@ def patch_site(
         s.blocked_reason = req.blocked_reason
     db.commit()
     return {"id": s.id, "status": s.status}
+
+
+@router.get("/api/backlinks/accounts/spreadsheet")
+def download_accounts_spreadsheet(
+    request: Request,
+    auth: AuthContext = Depends(require_roles("owner")),
+    db: Session = Depends(get_db),
+):
+    """Owner-only download of local plaintext `data/accounts.xlsx` ledger."""
+    path = get_accounts_spreadsheet_path()
+    if not path.exists():
+        from openpyxl import Workbook
+        from app.services.accounts_sheet import SHEET_HEADERS
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "accounts"
+        ws.append(SHEET_HEADERS)
+        wb.save(path)
+
+    record_audit(
+        db,
+        workspace_id=auth.workspace.id,
+        user_id=auth.user.id,
+        action="backlinks.accounts_spreadsheet.download",
+        target="accounts.xlsx",
+        ip=request.client.host if request.client else None,
+    )
+    db.commit()
+    return FileResponse(
+        path=str(path),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="accounts.xlsx",
+    )
 
 
 @router.get("/api/backlinks/accounts")

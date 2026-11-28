@@ -1,10 +1,10 @@
-# Unified Agent System (Phase 0 + Phase 1)
+# Unified Agent System (Phase 0 – Phase 3)
 
-منصة وكلاء ذكاء اصطناعي شخصية + منصة سيو وباك لينك ذاتية الاستضافة، **عربية RTL أولاً** (مع تبديل فوري للإنجليزية)، تعمل محلياً على جهازك أولاً ثم تنتقل بنفس ملف `docker-compose.yml` إلى خادم **Ubuntu 24.04 VPS (Contabo Cloud VPS 6)**.
+منصة وكلاء ذكاء اصطناعي شخصية + منصة سيو وباك لينك + **وكيل برمجة متكامل ذاتي الاستضافة**، **عربية RTL أولاً** (مع تبديل فوري للإنجليزية)، تعمل محلياً على جهازك أولاً ثم تنتقل بنفس ملف `docker-compose.yml` إلى خادم **Ubuntu 24.04 VPS (Contabo Cloud VPS 6)**.
 
 ---
 
-## المزايا المنفّذة في Phase 0 + Phase 1
+## المزايا المنفّذة (Phase 0 – Phase 3)
 
 - **لوحة تحكم عربي RTL أولاً (Next.js App Router + Tailwind):** شريط جانبي على اليمين، خصائص CSS المنطقية فقط (`start/end/ms/me`)، خطوط `Noto Kufi Arabic` و `JetBrains Mono`، أرقام غربية/عربية هندية، تقويم ميلادي/هجري، وضع ليلي/نهاري.
 - **راوتر وتفويض متعدد المزودين (Multi-Provider Orchestration):** `config/providers.example.yaml` و `config/models.yaml` (مفاتيح API فقط، بدون استخدام اشتراكات شخصية)، مع تعيين **Orchestrator** و **Workers حسب نوع المهمة** و **Reviewer من مزود مختلف** لكل وكيل من الإعدادات بدون تعديل الكود، وحدود ميزانية يومية/شهرية تتوقف تلقائياً عند السقف.
@@ -17,6 +17,18 @@
 - **الكابتشا بنظام Plugin Interface (`captcha/solver.py`):**
   - التنفيذ الافتراضي هو **`ManualSolver` (Human-in-the-Loop)** عبر المتصفح الحي `noVNC` على `127.0.0.1:6080` خلف نفق SSH فقط، مع إحصائيات حقيقية (`captcha_attempts`) وتنبيه الداشبورد و Telegram.
 - **الأمان (F1–F5):** مصادقة 2FA TOTP، فلتر تنظيف أسرار شامل في السجلات والأحداث، Kill Switch عام يوقف التشغيل خلال ثوانٍ، وحماية الخزنة (`Blind-Fill Vault`) المربوطة بالنطاقات.
+- **وكيل البرمجة (Phase 3 Coding Agent — `/coding`):**
+  - **مدير المسارات المتوازية (`/api/threads`):** حد توازٍ افتراضي `5` (`MAX_PARALLEL_CODING_THREADS`)، وعزل **Git Worktrees** ودمجها بضغطة واحدة.
+  - **الخطة أولاً (Plan-before-Code):** لا يعدّل ملفات قبل مراجعة الخطة وقائمة المهام و3 تصاميم متجاوبة (إلا عند كتابة `just do it` أو `نفذ مباشرة`).
+  - **التراجع الحقيقي (Disk Undo) + Fork:** حفظ لقطات الملفات قبل التعديل لإرجاع المحادثة والملفات على القرص بدقة، وتفريع الجلسة إلى Worktree مستقل.
+  - **التحقق في متصفح حقيقي (`coding_browser_verify.py`):** تشغيل Chromium/Chrome Headless عبر CDP، التقاط أخطاء Console، إصلاحها تلقائياً، وحفظ لقطة PNG + سجل التفاعل.
+  - **سباق النماذج (`POST /api/threads/{id}/race`) + Hooks + Goals + Subagents:** تشغيل مرشحين في Worktrees متوازية ودمج الفائز باختبار فعلي مع بقاء الفروع الخاسرة، وقواعد `pre_tool / post_tool / on_stop`، وأهداف `/goal` المستقلة مع الاستئناف التلقائي عند إعادة التشغيل.
+- **مكتبات SDK محلية بدون أي حزم خارجية:**
+  - Python (stdlib فقط): `sdk/python/uas_sdk.py` (`UnifiedAgentSDK`)
+  - JavaScript / Node 18+ (fetch مدمج): `sdk/js/uas_sdk.mjs` (`UnifiedAgentSDK`)
+- **موصلات النماذج المحلية المجمّعة (معطّلة افتراضياً ومفلترة تلقائياً في الإنتاج `ENV=production`):**
+  - `freellmapi` (`http://localhost:3001/v1`) و `free-claude-code` (`http://127.0.0.1:8082/v1`) بشارة `"محلي فقط" / "Local only"`.
+- **تصدير الحسابات المنشأة محلياً:** ملف `data/accounts.xlsx` (مستثنى عبر `.gitignore`) مع تحميله عبر `/api/backlinks/accounts/spreadsheet`.
 
 ---
 

@@ -130,6 +130,11 @@ export default function AgentDetailPage() {
             <Layers className="h-4 w-4 text-primary" />
             <span>{locale === "ar" ? "توزيع العقل المدبر والعمال والمراجع (Delegation)" : "Orchestrator, Workers & Reviewer Delegation"}</span>
           </h2>
+          <p className="text-xs text-muted">
+            {locale === "ar"
+              ? "مسموح باستخدام نفس المزود والموديل للعقل المدبر والمنفّذين في نفس المهمة؛ الفصل الإلزامي يقتصر فقط على اختلاف مزود المراجع."
+              : "Using the same provider/model for Orchestrator and Workers is allowed; only Reviewer must come from a different provider."}
+          </p>
 
           <div className="grid gap-3 sm:grid-cols-2">
             <div>

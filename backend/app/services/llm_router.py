@@ -30,6 +30,7 @@ from app.models.agents import AgentModel, Run
 from app.models.providers import AgentProviderAssignment, ApiKey, LlmCall, Provider, ProviderAccount
 from app.security.crypto import decrypt_secret
 from app.security.sanitizer import scrub_text
+from app.services.runtime_checks import is_local_endpoint
 
 
 class RouterError(Exception):
@@ -438,11 +439,13 @@ class LLMRouter:
         if preferred_provider_id:
             chain = [preferred_provider_id] + [p for p in chain if p != preferred_provider_id]
 
+        is_prod = get_settings().is_production
         all_enabled = {
             p.id: p
             for p in self.db.query(Provider)
             .filter(Provider.workspace_id == self.workspace_id, Provider.enabled.is_(True), Provider.kind != "captcha")
             .all()
+            if not (is_prod and (is_local_endpoint(p.api_base) or p.kind == "llm-local"))
         }
         ordered: list[Provider] = []
         for pid in chain:

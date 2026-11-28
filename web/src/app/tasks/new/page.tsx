@@ -39,25 +39,32 @@ export default function NewTaskPage() {
   const [dispatchMsg, setDispatchMsg] = useState("");
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const [mode, setMode] = useState<"once" | "repeat">("once");
+  const [mockMode, setMockMode] = useState(false);
   const [preview, setPreview] = useState<PreviewResp | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    apiFetch<{ agents: AgentItem[] }>("/api/agents").then((res) => {
+    Promise.all([
+      apiFetch<{ agents: AgentItem[] }>("/api/agents"),
+      apiFetch<{ default_mock_mode: boolean }>("/api/system/runtime-status").catch(() => ({ default_mock_mode: false })),
+    ]).then(([res, rs]) => {
+      const defMock = Boolean(rs?.default_mock_mode);
+      setMockMode(defMock);
       setAgents(res.agents);
       if (res.agents.length > 0) {
         const first = res.agents[0];
         setSelectedAgentId(first.id);
-        initDefaults(first);
+        initDefaults(first, defMock);
       }
     });
   }, []);
 
-  const initDefaults = (agent: AgentItem) => {
+  const initDefaults = (agent: AgentItem, mockOverride?: boolean) => {
     const defaults: Record<string, unknown> = {};
     const props = agent.input_schema?.properties || {};
     for (const [k, def] of Object.entries(props)) {
-      if (def.default !== undefined) defaults[k] = def.default;
+      if (k === "mock_mode" && mockOverride !== undefined) defaults[k] = mockOverride;
+      else if (def.default !== undefined) defaults[k] = def.default;
       else if (def.type === "boolean") defaults[k] = false;
       else if (def.type === "integer") defaults[k] = 10;
       else defaults[k] = "";
@@ -70,7 +77,7 @@ export default function NewTaskPage() {
   const handleSelectAgent = (id: string) => {
     setSelectedAgentId(id);
     const ag = agents.find((a) => a.id === id);
-    if (ag) initDefaults(ag);
+    if (ag) initDefaults(ag, mockMode);
     setPreview(null);
   };
 
@@ -125,7 +132,28 @@ export default function NewTaskPage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
-      <h1 className="text-xl font-bold">{t("tasks.title")}</h1>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-xl font-bold">{t("tasks.title")}</h1>
+        <button
+          type="button"
+          onClick={() => {
+            const next = !mockMode;
+            setMockMode(next);
+            setFormValues((prev) => ({ ...prev, mock_mode: next }));
+          }}
+          className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${
+            mockMode ? "border-warning bg-amber-500/15 text-warning" : "border-success bg-success/15 text-success"
+          }`}
+        >
+          {mockMode ? (locale === "ar" ? "وضع محاكاة (Simulation)" : "Simulation Mode") : (locale === "ar" ? "وضع حقيقي (Real)" : "Real Mode")}
+        </button>
+      </div>
+
+      {mockMode && (
+        <div className="rounded-xl border border-warning/40 bg-amber-500/10 p-3 text-xs font-semibold text-warning">
+          وضع محاكاة — لا يتم إنشاء حسابات حقيقية ولا روابط حية
+        </div>
+      )}
 
       {error && <div className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div>}
 

@@ -99,6 +99,33 @@ providers:
     budget_usd_daily: 0.0
     enabled: false
 
+  # --- مجمّعات محلية فقط (Subscription / Aggregated local endpoints — معطّلة تلقائياً في VPS/Production) ---
+  - id: freellmapi
+    kind: llm
+    connect: custom_endpoint
+    api_base: http://localhost:3001/v1
+    protocol: openai-completions
+    auth: env:FREELLMAPI_API_KEY
+    models:
+      cheap: auto
+      mid: auto
+      strong: auto
+    budget_usd_daily: 0.0
+    enabled: false
+
+  - id: free-claude-code
+    kind: llm
+    connect: custom_endpoint
+    api_base: http://127.0.0.1:8082/v1
+    protocol: openai-completions
+    auth: env:FCC_API_KEY
+    models:
+      cheap: open_router/openrouter/free
+      mid: openai/gpt-5.1
+      strong: openai/gpt-5.1
+    budget_usd_daily: 0.0
+    enabled: false
+
   # --- حسابات متعددة لنفس المزود (failover تلقائي) ---
   # في الـ UI: Settings > Models & accounts > openrouter-free > Add account
   # لما حساب يقرب من حده، الراوتر بينقل المهمة الجارية للحساب التاني من غير توقف.

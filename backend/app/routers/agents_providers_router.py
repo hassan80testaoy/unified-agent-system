@@ -24,6 +24,7 @@ from app.services.llm_router import (
     seed_default_providers,
     upsert_agent_assignment,
 )
+from app.services.runtime_checks import is_local_endpoint
 from app.skills.registry import list_all_skills
 
 router = APIRouter(tags=["agents_providers"])
@@ -150,6 +151,7 @@ def list_providers(auth: AuthContext = Depends(get_current_auth), db: Session = 
                 "protocol": p.protocol,
                 "path_id": p.path_id,
                 "api_base": p.api_base,
+                "local_only": is_local_endpoint(p.api_base) or p.kind == "llm-local",
                 "auth_ref": p.auth_ref,
                 "models": p.models_json,
                 "budget_usd_daily": p.budget_usd_daily,

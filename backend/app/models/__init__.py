@@ -60,6 +60,12 @@ from app.models.v3_harness import (
     ModePreset,
     ProjectMode,
 )
+from app.models.coding import (
+    CodingThread,
+    HookRule,
+    ModelRace,
+    ThreadFileSnapshot,
+)
 from app.models.seo import (
     ContactLog,
     ContentDraft,
@@ -126,4 +132,8 @@ __all__ = [
     "BlSession",
     "ChatThread",
     "ChatMessage",
+    "CodingThread",
+    "ThreadFileSnapshot",
+    "ModelRace",
+    "HookRule",
 ]

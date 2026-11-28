@@ -12,12 +12,14 @@ from app.models.google_account import GoogleAccount
 from app.models.mailboxes import Mailbox
 from app.models.providers import LlmCall
 from app.models.v3_harness import ChatMessage, ChatThread, ModePreset
+from app.security.crypto import decrypt_secret
 from app.security.sanitizer import scrub_text
 from app.services.browser_loop import run_flagship_backlink_loop
 from app.services.events import ws_hub
 from app.services.intent_router import classify_intent
 from app.services.llm_router import LLMRouter
 from app.services.modes import seed_default_modes
+from app.services.runtime_checks import validate_real_email
 from app.services.session_log import append_turn, get_session_log_path, rewind_log
 
 
@@ -216,32 +218,70 @@ async def process_user_message(
         reply_payload = _handle_reports(db, thread.workspace_id)
     elif intent == "backlink":
         domain = entities.get("domain")
-        email = entities.get("email") or "owner@example.com"
-        if not domain:
+        email = entities.get("email")
+        if not email:
+            active_google = (
+                db.query(GoogleAccount)
+                .filter(GoogleAccount.workspace_id == thread.workspace_id, GoogleAccount.status == "active")
+                .first()
+            )
+            if active_google and active_google.email_enc:
+                email = decrypt_secret(active_google.email_enc)
+        if not domain or not email:
             reply_payload = {
                 "content": (
                     "🔗 **وكيل الباك لينك جاهز (Flagship Loop):**\n"
-                    "اذكر اسم الموقع المستهدف (مثال: `medium.com`) والإيميل المطلوب التسجيل به وسأبدأ الدورة الكاملة."
+                    "يرجى تحديد اسم الموقع المستهدف والبريد الإلكتروني الحقيقي للتسجيل (مثال: `سجل في about.me بالإيميل yourreal@gmail.com`)."
                 ),
                 "card_type": None,
-                "card_payload": {"need": ["domain", "email"]},
+                "card_payload": {"need": ["domain", "email"], "mock_mode": bool(mock_mode)},
             }
         else:
-            loop_res = await run_flagship_backlink_loop(
-                db,
-                workspace_id=thread.workspace_id,
-                user_id=user_id,
-                domain=domain,
-                email=email,
-                mock_mode=mock_mode,
-                simulate_captcha=simulate_captcha,
-                simulate_2fa=simulate_2fa,
+            ok_email, email_err = validate_real_email(email)
+            if not ok_email:
+                reply_payload = {
+                    "content": email_err or "يرجى إدخال بريد إلكتروني حقيقي للتسجيل.",
+                    "card_type": None,
+                    "card_payload": {"status": "invalid_email", "mock_mode": bool(mock_mode)},
+                }
+            else:
+                loop_res = await run_flagship_backlink_loop(
+                    db,
+                    workspace_id=thread.workspace_id,
+                    user_id=user_id,
+                    domain=domain,
+                    email=email,
+                    mock_mode=bool(mock_mode),
+                    simulate_captcha=simulate_captcha,
+                    simulate_2fa=simulate_2fa,
+                )
+                loop_res.setdefault("mock_mode", bool(mock_mode))
+                reply_payload = {
+                    "content": loop_res["report_ar"],
+                    "card_type": loop_res.get("card_type"),
+                    "card_payload": loop_res,
+                }
+    elif intent == "coding":
+        router = LLMRouter(db, thread.workspace_id)
+        try:
+            res = router.route(
+                task_type="coding",
+                tier="mid",
+                prompt=clean_text,
+                system_prompt="You are a general-purpose software engineer assistant. Provide a concise Arabic plan and next action.",
+                use_cache=False,
             )
-            reply_payload = {
-                "content": loop_res["report_ar"],
-                "card_type": loop_res.get("card_type"),
-                "card_payload": loop_res,
-            }
+            ans = res.get("raw_text") or ""
+        except Exception:
+            ans = ""
+        reply_payload = {
+            "content": (
+                "💻 **تم توجيه طلبك إلى وكيل البرمجة العام (Coding Agent):**\n"
+                + (ans or "يمكنك فتح صفحة **وكيل البرمجة (`/coding`)** لإنشاء الخطة ومعاينة التصميم والتشغيل في المتصفح الحي.")
+            ),
+            "card_type": None,
+            "card_payload": {"mode": thread.mode_key, "mock_mode": bool(mock_mode), "coding_route": "/coding"},
+        }
     else:
         router = LLMRouter(db, thread.workspace_id)
         sys_prompt = mode_row.system_prompt if mode_row else "You are a helpful Arabic-first assistant."
@@ -308,6 +348,7 @@ async def process_user_message(
     return {
         "thread_id": thread.id,
         "intent": intent,
+        "mock_mode": bool(mock_mode),
         "routing": route_info,
         "user_message": {
             "id": user_msg.id,
