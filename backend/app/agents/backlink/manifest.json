@@ -73,7 +73,7 @@
       "mock_mode": {
         "type": "boolean",
         "title": "وضع المحاكاة الآمن (بدون فتح مواقع حقيقية)",
-        "default": true
+        "default": false
       }
     }
   },

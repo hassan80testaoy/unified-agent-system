@@ -104,6 +104,7 @@ class Settings(BaseSettings):
     config_dir: Path = REPO_ROOT / "config"
     browser_profiles_dir: Path = BACKEND_DIR / "data" / "browser_profiles"
     artifacts_dir: Path = BACKEND_DIR / "data" / "artifacts"
+    max_parallel_coding_threads: int = 5
 
     @property
     def is_production(self) -> bool:

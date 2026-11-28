@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
+from app import db as db_mod
 from app.db import Base, engine
 from app.routers import (
     agents_providers_router,
@@ -15,11 +16,13 @@ from app.routers import (
     backlinks_router,
     captcha_vault_reports_router,
     chat_router,
+    coding_router,
     mail_google_router,
     modes_router,
     tasks_runs_router,
 )
 from app.security.sanitizer import install_log_sanitizer
+from app.services.coding_agent import resume_interrupted_threads
 
 
 @asynccontextmanager
@@ -27,6 +30,14 @@ async def lifespan(_app: FastAPI):
     install_log_sanitizer()
     get_settings().ensure_dirs()
     Base.metadata.create_all(bind=engine)
+    db = db_mod.SessionLocal()
+    try:
+        resume_interrupted_threads(db)
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
     yield
 
 
@@ -57,3 +68,4 @@ app.include_router(mail_google_router.router)
 app.include_router(captcha_vault_reports_router.router)
 app.include_router(modes_router.router)
 app.include_router(chat_router.router)
+app.include_router(coding_router.router)

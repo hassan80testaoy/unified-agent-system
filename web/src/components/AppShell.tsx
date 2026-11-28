@@ -8,6 +8,7 @@ import {
   Bell,
   Bot,
   CheckSquare,
+  Code2,
   FileBarChart,
   Globe,
   KeyRound,
@@ -97,6 +98,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const navItems = [
     { href: "/", label: t("nav.chat"), icon: MessageSquare },
     { href: "/dashboard", label: t("nav.dashboard"), icon: LayoutDashboard },
+    { href: "/coding", label: t("nav.coding_agent"), icon: Code2 },
     { href: "/agents", label: t("nav.agents"), icon: Bot },
     { href: "/tasks/new", label: t("nav.new_task"), icon: PlusCircle },
     { href: "/runs", label: t("nav.runs"), icon: Activity },

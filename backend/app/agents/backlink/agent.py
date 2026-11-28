@@ -31,8 +31,10 @@ from app.models.captcha import CaptchaAttempt
 from app.models.google_account import GoogleAccount
 from app.models.mailboxes import Mailbox
 from app.security.crypto import decrypt_secret
+from app.services.accounts_sheet import record_account_in_spreadsheet
 from app.services.google_account import ask_user_for_verification_code
 from app.services.mailbox import alias_for, fetch_and_find_verification_imap
+from app.services.runtime_checks import get_runtime_readiness, validate_real_email
 from app.services.session_replay import replay_backlink_session, save_backlink_session
 from app.services.captcha_inject import inject_token_via_worker
 from app.services.vault import create_server_generated_site_password
@@ -215,9 +217,22 @@ class BacklinkAgent:
         max_per_day = int(task_input.get("max_per_day") or 10)
         site_filter = str(task_input.get("site_filter") or "queued")
         auth_strategy = str(task_input.get("auth_strategy") or "google_first")
-        mock_mode = bool(task_input.get("mock_mode", True))
+        mock_mode = bool(task_input.get("mock_mode", False))
         simulate_captcha_sites = set(task_input.get("simulate_captcha_sites") or [])
         simulate_2fa_sites = set(task_input.get("simulate_2fa_sites") or [])
+
+        if not mock_mode:
+            readiness = get_runtime_readiness(db, ws)
+            if not readiness["real_backlink_ready"]:
+                missing_msg = "لا يمكن بدء التشغيل الحقيقي لوكيل الباك لينك قبل توفير: " + "، ".join(
+                    readiness["missing_for_real_backlink"]
+                )
+                ctx.run.status = "failed"
+                ctx.run.error = missing_msg
+                ctx.run.finished_at = datetime.now(timezone.utc)
+                db.commit()
+                await ctx.emit("error", "missing_requirements", missing_msg, {"missing": readiness["missing_keys"]})
+                return {"status": "missing_requirements", "missing": readiness["missing_keys"], "error": missing_msg}
 
         seed_backlink_defaults(db, ws, target_domain=target_domain, maps_url=maps_url)
         identity = db.query(BlIdentity).filter(BlIdentity.workspace_id == ws).first()
@@ -363,16 +378,24 @@ class BacklinkAgent:
                 site_slug = site.domain.split(".")[0]
                 using_google_oauth = bool(auth_strategy == "google_first" and google_acct and google_acct.status == "active")
 
-                if using_google_oauth and google_acct is not None:
+                if task_input.get("email"):
+                    explicit_email = str(task_input["email"]).strip()
+                    ok_em, err_em = validate_real_email(explicit_email)
+                    if not ok_em:
+                        raise ValueError(err_em or "invalid_placeholder_email")
+                    email_used = explicit_email
+                elif using_google_oauth and google_acct is not None:
                     raw_google_email = decrypt_secret(google_acct.email_enc)
                     email_used = alias_for(raw_google_email, site_slug, google_acct.supports_plus)
                     del raw_google_email
                 elif mailbox is not None:
                     email_used = alias_for(mailbox.email, site_slug, mailbox.supports_plus)
                 else:
-                    email_used = f"seo+{site_slug}@example.com"
+                    if not mock_mode:
+                        raise ValueError("missing_real_email_or_account")
+                    email_used = f"seo+{site_slug}@mock-sim.local"
 
-                _, site_pw_enc = create_server_generated_site_password()
+                raw_pw, site_pw_enc = create_server_generated_site_password()
                 username = f"moaaz_seo_{site_slug}"[:32]
                 account = BlAccount(
                     workspace_id=ws,
@@ -386,6 +409,15 @@ class BacklinkAgent:
                 )
                 db.add(account)
                 db.flush()
+                record_account_in_spreadsheet(
+                    domain=site.domain,
+                    email_username=email_used,
+                    password=raw_pw,
+                    profile_url="",
+                    notes="simulation" if mock_mode else "live",
+                )
+                raw_pw = ""
+                del raw_pw
 
                 # Check prior Session Replay before executing steps
                 replay_info = replay_backlink_session(db, workspace_id=ws, domain=site.domain)
@@ -624,6 +656,13 @@ class BacklinkAgent:
                 )
                 account.profile_url = profile_url
                 account.verified_at = datetime.now(timezone.utc).isoformat()
+                record_account_in_spreadsheet(
+                    domain=site.domain,
+                    email_username=email_used,
+                    password="",
+                    profile_url=profile_url,
+                    notes="simulation" if mock_mode else "live",
+                )
 
                 if mock_mode:
                     link_type = "nofollow" if idx % 3 == 0 else "dofollow"
@@ -665,7 +704,8 @@ class BacklinkAgent:
                 site.status = "live" if is_live else "pending_review"
                 run_item.status = site.status
                 run_item.result = {
-                    "profile_url": profile_url,
+                    "profile_url": profile_url if not mock_mode else f"{profile_url} (محاكاة، ليس رابطاً حياً)",
+                    "is_mock": mock_mode,
                     "link_type": link_type,
                     "anchor": anchor_hp.text if anchor_hp else "",
                     "bio_preview": bio_text[:60],
@@ -682,8 +722,8 @@ class BacklinkAgent:
                 await ctx.emit(
                     "info",
                     "site_done",
-                    f"{site.domain} -> {site.status} ({link_type})",
-                    {"site": site.domain, "status": site.status, "link_type": link_type, "profile_url": profile_url},
+                    ("محاكاة — " if mock_mode else "") + f"{site.domain} -> {site.status} ({link_type})",
+                    {"site": site.domain, "status": site.status, "link_type": link_type, "profile_url": profile_url, "is_mock": mock_mode},
                 )
                 await asyncio.sleep(0.01 if mock_mode else random.uniform(0.8, 2.2))
 
@@ -705,7 +745,8 @@ class BacklinkAgent:
         if ctx.run.status == "running":
             ctx.run.status = "done"
             ctx.run.finished_at = datetime.now(timezone.utc)
+        counts["is_mock"] = mock_mode
         ctx.run.summary_json = counts
         db.commit()
-        await ctx.emit("info", "run_completed", "اكتمل تشغيل وكيل الباك لينك.", counts)
+        await ctx.emit("info", "run_completed", ("محاكاة — " if mock_mode else "") + "اكتمل تشغيل وكيل الباك لينك.", counts)
         return counts

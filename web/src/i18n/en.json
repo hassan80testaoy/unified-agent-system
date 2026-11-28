@@ -4,6 +4,7 @@
   "nav": {
     "chat": "Chat",
     "dashboard": "Dashboard",
+    "coding_agent": "Coding Agent",
     "agents": "Agents",
     "new_task": "New Task",
     "runs": "Runs",
@@ -155,5 +156,34 @@
   "replay": {
     "title": "Session Replay",
     "no_session": "No recorded session yet"
+  },
+  "coding": {
+    "title": "AI Coding Agent",
+    "subtitle": "Plan-before-code, disk Undo snapshots, Git worktrees, Model Races & real Chrome verification",
+    "new_thread": "New Coding Task",
+    "thread_title_ph": "Task title (e.g. Build Arabic Todo App)",
+    "create_thread": "Create Thread",
+    "parallel_cap": "Parallel Threads",
+    "tab_live": "Live & Plan",
+    "tab_changes": "Changes & Diff",
+    "tab_browser": "Browser & Visuals",
+    "tab_context": "Context",
+    "tab_prompt": "Prompt",
+    "tab_agents": "Race & Agents",
+    "plan_review": "Implementation Plan & 3 Responsive Designs",
+    "approve_execute": "Approve & Execute",
+    "bypass_hint": "Or type \"just do it\" to skip planning",
+    "send_prompt": "Send",
+    "prompt_ph": "Describe coding task, /goal <outcome>, or \"just do it\"...",
+    "todo_title": "Live Editable Todo",
+    "save_todo": "Save Todos",
+    "undo_here": "Undo to here (Disk + Chat)",
+    "fork_here": "Fork Worktree",
+    "create_worktree": "Create Git Worktree",
+    "merge_worktree": "1-Click Merge Worktree",
+    "run_race": "Start Model Race",
+    "spawn_subagent": "Spawn Subagent",
+    "goals_title": "Autopilot Goals",
+    "hooks_title": "Execution Hooks"
   }
 }

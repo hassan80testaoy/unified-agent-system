@@ -81,6 +81,21 @@ _REPORTS_KEYWORDS = (
     "daily summary",
 )
 
+_CODING_KEYWORDS = (
+    "ابني",
+    "برمج",
+    "برمجة",
+    "تطبيق",
+    "مهام",
+    "كود",
+    "build me",
+    "create app",
+    "build an app",
+    "todo app",
+    "web app",
+    "coding",
+)
+
 
 def classify_intent(text: str) -> dict[str, Any]:
     """Classify natural-language Arabic/Egyptian/English user request cleanly."""
@@ -131,5 +146,10 @@ def classify_intent(text: str) -> dict[str, Any]:
         if kw in lower:
             return {"intent": "reports", "confidence": 0.9, "matched_rule": kw, "entities": entities}
 
-    # 6. General chat
+    # 6. General Coding Agent (building apps/sites — never forced into SEO/backlinks)
+    for kw in _CODING_KEYWORDS:
+        if kw in lower:
+            return {"intent": "coding", "confidence": 0.92, "matched_rule": kw, "entities": entities}
+
+    # 7. General chat
     return {"intent": "general", "confidence": 0.75, "matched_rule": "fallback_general", "entities": entities}

@@ -51,15 +51,16 @@ def test_intent_routing_and_chat_ndjson_compact_undo(owner_session):
     assert r2.status_code == 200
     assert r2.json()["intent"] == "agent-mail"
 
-    # 3. Backlink query runs Flagship Loop cleanly
+    # 3. Backlink query runs Flagship Loop cleanly in explicit simulation mode
     r3 = client.post(
         f"/api/chat/threads/{tid}/messages",
         headers=headers,
-        json={"content": "سجل لي حساب في موقع hubpages.com بالإيميل seo@example.com واعمل باك لينك"},
+        json={"content": "سجل لي حساب في موقع hubpages.com بالإيميل moaaz.seo.real@mydomain.io واعمل باك لينك"},
     )
     assert r3.status_code == 200
     assert r3.json()["intent"] == "backlink"
-    assert "تم ✅" in r3.json()["assistant_message"]["content"]
+    assert "محاكاة — " in r3.json()["assistant_message"]["content"]
+    assert r3.json()["assistant_message"]["card_payload"]["is_mock"] is True
 
     assert ndjson_path.exists()
     active_before_undo = read_log(tid)
@@ -123,7 +124,7 @@ def test_session_replay_secret_stripping_fuzzy_match_and_flagship_loop(owner_ses
             workspace_id=ws_id,
             user_id=user_id,
             domain="twofa-site.example",
-            email="u@example.com",
+            email="moaaz.twofa@mydomain.io",
             mock_mode=True,
             simulate_2fa=True,
         )

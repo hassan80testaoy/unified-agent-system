@@ -47,7 +47,8 @@ class Goal(Base, TimestampMixin):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False, index=True)
-    agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agents.id"), nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("agents.id"), nullable=True)
+    thread_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("threads.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     outcome: Mapped[str] = mapped_column(Text, nullable=False)
     metric_name: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -55,10 +56,13 @@ class Goal(Base, TimestampMixin):
     metric_target: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     schedule_cron: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    status: Mapped[str] = mapped_column(String(24), default="draft", nullable=False)  # draft|active|paused|done|stopped
+    autopilot: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="draft", nullable=False)  # draft|active|paused|done|stopped|blocked
     plan: Mapped[dict[str, Any]] = mapped_column(PortableJSON, default=dict, nullable=False)
     plan_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    checkpoint_json: Mapped[dict[str, Any]] = mapped_column(PortableJSON, default=dict, nullable=False)
+    blocked_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class Task(Base, TimestampMixin):
@@ -143,9 +147,11 @@ class Artifact(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False, index=True)
     run_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("runs.id"), nullable=True)
-    kind: Mapped[str] = mapped_column(String(24), nullable=False)  # csv|pdf|json|screenshot
+    thread_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("threads.id"), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)  # csv|pdf|json|screenshot|plan|design|recording|task_list
     path: Mapped[str] = mapped_column(String(512), nullable=False)
     size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(PortableJSON, nullable=True)
 
 
 class Report(Base, TimestampMixin):

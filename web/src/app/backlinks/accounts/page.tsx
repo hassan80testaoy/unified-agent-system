@@ -76,13 +76,28 @@ export default function BacklinkAccountsPage() {
               : "Passwords are encrypted and NEVER included in exports; reveal is audited."}
           </p>
         </div>
-        <a
-          href="/api/backlinks/export?table=accounts"
-          className="inline-flex min-h-[40px] items-center gap-2 rounded-lg border border-borderline bg-surface px-3 text-xs font-semibold"
-        >
-          <Download className="h-4 w-4" />
-          <span>{locale === "ar" ? "تصدير بدون باسوردات" : "Export CSV (No Passwords)"}</span>
-        </a>
+        <div className="flex flex-wrap gap-2">
+          <a
+            href="/api/backlinks/accounts/spreadsheet"
+            className="inline-flex min-h-[40px] items-center gap-2 rounded-lg border border-primary bg-primary/10 px-3 text-xs font-semibold text-primary"
+          >
+            <Download className="h-4 w-4" />
+            <span>{locale === "ar" ? "تنزيل جدول الحسابات (accounts.xlsx)" : "Download accounts.xlsx"}</span>
+          </a>
+          <a
+            href="/api/backlinks/export?table=accounts"
+            className="inline-flex min-h-[40px] items-center gap-2 rounded-lg border border-borderline bg-surface px-3 text-xs font-semibold"
+          >
+            <Download className="h-4 w-4" />
+            <span>{locale === "ar" ? "تصدير بدون باسوردات" : "Export CSV (No Passwords)"}</span>
+          </a>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-warning/40 bg-amber-500/10 p-3 text-xs text-warning">
+        {locale === "ar"
+          ? "تنبيه: الملف المحلي data/accounts.xlsx يحفظ كلمات مرور المواقع بنص واضح على جهازك فقط لاختيارك (مملوك لك ومستبعد من Git) — لا ترفعه أو تشاركه."
+          : "Notice: data/accounts.xlsx stores generated site passwords in plaintext strictly on your local machine (gitignored, owner-only download). Never share or upload it."}
       </div>
 
       {error && <div className="rounded-lg border border-danger/30 bg-danger/10 p-3 text-xs text-danger">{error}</div>}
