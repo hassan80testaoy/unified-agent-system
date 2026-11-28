@@ -4,17 +4,34 @@ import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Bot,
+  Brain,
+  Clock,
+  ExternalLink,
+  Layers,
   LayoutDashboard,
+  Mic,
   Minimize2,
+  Monitor,
+  Pause,
+  Play,
   Plus,
   RotateCcw,
   Send,
   ShieldAlert,
   Sparkles,
   Square,
+  Volume2,
+  X,
 } from "lucide-react";
 import { useApp } from "@/i18n/context";
 import { apiFetch } from "@/lib/api";
+
+function stripRenderToolMarkup(text: string): string {
+  return (text || "")
+    .replace(/<tool_call[\s\S]*?<\/tool_call>/gi, "")
+    .replace(/<\/?tool_call>/gi, "")
+    .trim();
+}
 
 interface ChatThread {
   id: string;
@@ -22,6 +39,10 @@ interface ChatThread {
   mode_key: string;
   project_key: string;
   approval_mode: string;
+  autonomy_mode?: string;
+  paused?: boolean;
+  pending_steering?: Array<{ instruction: string }>;
+  loaded_memory_ids?: string[];
   compacted_summary?: string | null;
   status: string;
 }
@@ -60,6 +81,15 @@ export default function ChatHomePage() {
   const [notice, setNotice] = useState("");
   const [mockMode, setMockMode] = useState(false);
   const [streamSteps, setStreamSteps] = useState<Array<{ step?: number; tool?: string; url?: string; detail?: string; screenshot_url?: string }>>([]);
+  const [liveStatuses, setLiveStatuses] = useState<
+    Record<string, { status: string; paused: boolean; autonomy_mode: string; loaded_memories_count: number; pending_steering_count: number }>
+  >({});
+  const [steerInput, setSteerInput] = useState("");
+  const [showTimeline, setShowTimeline] = useState(false);
+  const [showScreenPreview, setShowScreenPreview] = useState(false);
+  const [screenBlobUrl, setScreenBlobUrl] = useState<string>("");
+  const [listeningVoice, setListeningVoice] = useState(false);
+  const [previewPane, setPreviewPane] = useState<{ title: string; kind: string; html?: string; blobUrl?: string; downloadUrl?: string } | null>(null);
   const [runtimeReady, setRuntimeReady] = useState<{
     llm_provider: boolean;
     browser_worker: boolean;
@@ -83,8 +113,25 @@ export default function ChatHomePage() {
   const abortRef = useRef<AbortController | null>(null);
 
   const loadThreads = async () => {
-    const res = await apiFetch<{ threads: ChatThread[] }>("/api/chat/threads").catch(() => ({ threads: [] }));
+    const [res, live] = await Promise.all([
+      apiFetch<{ threads: ChatThread[] }>("/api/chat/threads").catch(() => ({ threads: [] })),
+      apiFetch<{
+        threads: Array<{
+          thread_id: string;
+          status: string;
+          paused: boolean;
+          autonomy_mode: string;
+          loaded_memories_count: number;
+          pending_steering_count: number;
+        }>;
+      }>("/api/chat/threads/live-status").catch(() => ({ threads: [] })),
+    ]);
     setThreads(res.threads);
+    const map: Record<string, { status: string; paused: boolean; autonomy_mode: string; loaded_memories_count: number; pending_steering_count: number }> = {};
+    for (const st of live.threads || []) {
+      map[st.thread_id] = st;
+    }
+    setLiveStatuses(map);
     if (!activeId && res.threads.length > 0) {
       setActiveId(res.threads[0].id);
     }
@@ -276,7 +323,7 @@ export default function ChatHomePage() {
     }
   };
 
-  const updateThreadSetting = async (patch: { mode_key?: string; approval_mode?: string }) => {
+  const updateThreadSetting = async (patch: { mode_key?: string; approval_mode?: string; autonomy_mode?: string }) => {
     if (!activeId) return;
     const res = await apiFetch<{ thread: ChatThread }>(`/api/chat/threads/${activeId}`, {
       method: "PATCH",
@@ -284,6 +331,93 @@ export default function ChatHomePage() {
     });
     setActiveThread(res.thread);
     setThreads((prev) => prev.map((th) => (th.id === res.thread.id ? res.thread : th)));
+  };
+
+  const handlePauseResume = async () => {
+    if (!activeId) return;
+    const isPaused = Boolean(activeThread?.paused || liveStatuses[activeId]?.paused);
+    const path = isPaused ? `/api/chat/threads/${activeId}/resume` : `/api/chat/threads/${activeId}/pause`;
+    await apiFetch(path, { method: "POST" });
+    await Promise.all([loadThreads(), loadThreadDetail(activeId)]);
+  };
+
+  const handleSteerSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeId || !steerInput.trim()) return;
+    await apiFetch(`/api/chat/threads/${activeId}/steer`, {
+      method: "POST",
+      body: JSON.stringify({ instruction: steerInput.trim() }),
+    });
+    setSteerInput("");
+    setNotice(locale === "ar" ? "تم إرسال التوجيه المباشر للمحادثة الجارية." : "Mid-run steering instruction queued.");
+    await Promise.all([loadThreads(), loadThreadDetail(activeId)]);
+  };
+
+  const handleOpenArtifactPreview = async (artifactId: string, title: string, kind: string) => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("uas_token") : null;
+    const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+    const resp = await fetch(`/api/artifacts/${artifactId}/preview`, { headers, credentials: "include" }).catch(() => null);
+    if (!resp || !resp.ok) return;
+    const ctype = resp.headers.get("content-type") || "";
+    if (ctype.includes("text/html") || kind === "web_app" || kind === "html_app" || kind === "presentation") {
+      const html = await resp.text();
+      setPreviewPane({ title, kind, html, downloadUrl: `/api/artifacts/${artifactId}/download` });
+    } else {
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      setPreviewPane({ title, kind, blobUrl: url, downloadUrl: `/api/artifacts/${artifactId}/download` });
+    }
+  };
+
+  const handleToggleScreenPreview = async () => {
+    const next = !showScreenPreview;
+    setShowScreenPreview(next);
+    if (next) {
+      const meta = await apiFetch<{ available: boolean; screenshot_url: string | null }>("/api/browser/screen-latest").catch(() => null);
+      if (meta?.available && meta.screenshot_url) {
+        const token = typeof window !== "undefined" ? localStorage.getItem("uas_token") : null;
+        const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+        const resp = await fetch(meta.screenshot_url, { headers, credentials: "include" }).catch(() => null);
+        if (resp && resp.ok) {
+          const blob = await resp.blob();
+          setScreenBlobUrl(URL.createObjectURL(blob));
+        }
+      }
+    }
+  };
+
+  const handleVoiceDictation = async () => {
+    if (typeof window === "undefined") return;
+    const win = window as unknown as {
+      SpeechRecognition?: new () => { lang: string; onresult: (ev: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void; onend: () => void; start: () => void };
+      webkitSpeechRecognition?: new () => { lang: string; onresult: (ev: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void; onend: () => void; start: () => void };
+    };
+    const SR = win.SpeechRecognition || win.webkitSpeechRecognition;
+    if (SR) {
+      const rec = new SR();
+      rec.lang = locale === "ar" ? "ar-EG" : "en-US";
+      setListeningVoice(true);
+      rec.onresult = (ev) => {
+        const spoken = ev.results?.[0]?.[0]?.transcript || "";
+        if (spoken) setInput((prev) => (prev ? `${prev} ${spoken}` : spoken));
+      };
+      rec.onend = () => setListeningVoice(false);
+      rec.start();
+    } else {
+      const res = await apiFetch<{ transcript: string }>("/api/voice/transcribe", {
+        method: "POST",
+        body: JSON.stringify({ transcript_hint: input.trim() || "رسالة صوتية" }),
+      }).catch(() => null);
+      if (res?.transcript) setNotice(res.transcript);
+    }
+  };
+
+  const handleSpeakText = (txt: string) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(stripRenderToolMarkup(txt).slice(0, 800));
+    u.lang = locale === "ar" ? "ar-EG" : "en-US";
+    window.speechSynthesis.speak(u);
   };
 
   const handleCompact = async () => {
@@ -350,21 +484,38 @@ export default function ChatHomePage() {
               {t("common.empty")}
             </div>
           ) : (
-            threads.map((th) => (
-              <button
-                key={th.id}
-                type="button"
-                onClick={() => setActiveId(th.id)}
-                className={`w-full rounded-lg border px-3 py-2 text-start text-xs transition ${
-                  th.id === activeId
-                    ? "border-primary bg-primary/10 font-semibold text-primary"
-                    : "border-borderline bg-canvas hover:border-primary/40"
-                }`}
-              >
-                <div className="truncate">{th.title}</div>
-                <div className="mt-0.5 text-[10px] text-muted">{th.mode_key}</div>
-              </button>
-            ))
+            threads.map((th) => {
+              const ls = liveStatuses[th.id];
+              const st = ls?.paused || th.paused ? "paused" : ls?.status || th.status || "idle";
+              return (
+                <button
+                  key={th.id}
+                  type="button"
+                  onClick={() => setActiveId(th.id)}
+                  className={`w-full rounded-lg border px-3 py-2 text-start text-xs transition ${
+                    th.id === activeId
+                      ? "border-primary bg-primary/10 font-semibold text-primary"
+                      : "border-borderline bg-canvas hover:border-primary/40"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="truncate">{th.title}</span>
+                    <span
+                      className={`shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[9px] ${
+                        st === "running"
+                          ? "bg-primary/20 text-primary"
+                          : st === "paused"
+                          ? "bg-warning/20 text-warning"
+                          : "bg-surface text-muted"
+                      }`}
+                    >
+                      {st}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 text-[10px] text-muted">{th.mode_key}</div>
+                </button>
+              );
+            })
           )}
         </div>
       </aside>
@@ -433,6 +584,51 @@ export default function ChatHomePage() {
                   ? "وضع حقيقي (Real)"
                   : "Real Mode"}
               </span>
+            </button>
+
+            <label className="flex items-center gap-1.5 rounded-lg border border-borderline bg-canvas px-2 py-1">
+              <span className="text-muted">{t("phase8.autonomy_label")}:</span>
+              <select
+                value={activeThread?.autonomy_mode || "checkpoint"}
+                onChange={(e) => updateThreadSetting({ autonomy_mode: e.target.value })}
+                className="bg-transparent font-semibold outline-none"
+              >
+                <option value="autonomous">{locale === "ar" ? "تلقائي بالكامل" : "Autonomous"}</option>
+                <option value="checkpoint">{locale === "ar" ? "نقاط تفتيش" : "Checkpoint"}</option>
+                <option value="supervised">{locale === "ar" ? "تحت الإشراف" : "Supervised"}</option>
+              </select>
+            </label>
+
+            <button
+              type="button"
+              onClick={handlePauseResume}
+              disabled={!activeId}
+              className="inline-flex items-center gap-1 rounded-lg border border-borderline bg-canvas px-2.5 py-1 hover:border-primary disabled:opacity-40"
+            >
+              {activeThread?.paused ? <Play className="h-3.5 w-3.5 text-success" /> : <Pause className="h-3.5 w-3.5 text-warning" />}
+              <span>{activeThread?.paused ? t("phase8.resume") : t("phase8.pause")}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowTimeline((v) => !v)}
+              className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 ${
+                showTimeline ? "border-primary bg-primary/10 text-primary" : "border-borderline bg-canvas"
+              }`}
+            >
+              <Clock className="h-3.5 w-3.5" />
+              <span>{t("phase8.timeline")}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleToggleScreenPreview}
+              className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 ${
+                showScreenPreview ? "border-primary bg-primary/10 text-primary" : "border-borderline bg-canvas"
+              }`}
+            >
+              <Monitor className="h-3.5 w-3.5" />
+              <span>{t("phase8.live_screen")}</span>
             </button>
 
             <button
@@ -522,6 +718,49 @@ export default function ChatHomePage() {
           <div className="border-b border-borderline bg-primary/5 px-4 py-2 text-xs text-primary">{notice}</div>
         )}
 
+        {showScreenPreview && (
+          <div className="border-b border-borderline bg-canvas p-3 text-xs">
+            <div className="mb-1.5 flex items-center justify-between font-bold text-primary">
+              <span>{t("phase8.live_screen")}</span>
+              <button type="button" onClick={() => setShowScreenPreview(false)} className="text-muted hover:text-danger">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            {screenBlobUrl ? (
+              <img src={screenBlobUrl} alt="Live browser view" className="max-h-56 rounded-lg border border-borderline object-contain" />
+            ) : (
+              <div className="text-muted">{locale === "ar" ? "لا توجد لقطة متصفح نشطة بعد." : "No active browser screen capture yet."}</div>
+            )}
+          </div>
+        )}
+
+        {previewPane && (
+          <div className="border-b border-borderline bg-canvas p-3 text-xs">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="flex items-center gap-1.5 font-bold text-primary">
+                <Layers className="h-4 w-4" />
+                <span>{t("phase8.artifact_preview")}: {previewPane.title}</span>
+              </span>
+              <div className="flex items-center gap-2">
+                {previewPane.downloadUrl && (
+                  <a href={previewPane.downloadUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded border border-borderline bg-surface px-2 py-1 hover:border-primary">
+                    <ExternalLink className="h-3 w-3" />
+                    <span>{locale === "ar" ? "تنزيل" : "Download"}</span>
+                  </a>
+                )}
+                <button type="button" onClick={() => setPreviewPane(null)} className="text-muted hover:text-danger">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+            {previewPane.html ? (
+              <iframe sandbox="allow-scripts" srcDoc={previewPane.html} title={previewPane.title} className="h-72 w-full rounded-lg border border-borderline bg-white" />
+            ) : previewPane.blobUrl ? (
+              <img src={previewPane.blobUrl} alt={previewPane.title} className="max-h-64 rounded-lg border border-borderline object-contain" />
+            ) : null}
+          </div>
+        )}
+
         {/* Messages Stream */}
         <div className="flex-1 space-y-3 overflow-y-auto p-4">
           {messages.length === 0 ? (
@@ -553,13 +792,62 @@ export default function ChatHomePage() {
               >
                 <div className="flex items-center justify-between gap-2 text-[10px] text-muted">
                   <span className="font-bold uppercase">{m.role === "user" ? (locale === "ar" ? "أنت" : "You") : "Agent"}</span>
-                  {m.intent && (
-                    <span className="rounded bg-surface px-1.5 py-0.5 font-mono">
-                      {t("chat.intent_label")}: {m.intent}
-                    </span>
-                  )}
+                  <div className="flex items-center gap-1.5">
+                    {m.intent && (
+                      <span className="rounded bg-surface px-1.5 py-0.5 font-mono">
+                        {t("chat.intent_label")}: {m.intent}
+                      </span>
+                    )}
+                    {m.role === "assistant" && (
+                      <button
+                        type="button"
+                        onClick={() => handleSpeakText(m.content)}
+                        title={t("phase8.read_aloud")}
+                        className="rounded p-0.5 hover:text-primary"
+                      >
+                        <Volume2 className="h-3 w-3" />
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <div className="whitespace-pre-wrap leading-relaxed">{m.content}</div>
+                <div className="whitespace-pre-wrap leading-relaxed">{stripRenderToolMarkup(m.content)}</div>
+
+                {(() => {
+                  const loadedMem = (m.card_payload?.loaded_memories as Array<{ content?: string }> | undefined) || [];
+                  const tline = (m.card_payload?.timeline as Array<{ label_ar?: string; stage?: string }> | undefined) || [];
+                  const artObj = m.card_payload?.artifact as { id?: string; title?: string; kind?: string } | undefined;
+                  const artId = (m.card_payload?.artifact_id as string | undefined) || artObj?.id;
+                  const artKind = (m.card_payload?.artifact_kind as string | undefined) || artObj?.kind || "html_app";
+                  const artTitle = artObj?.title || (locale === "ar" ? "مخرج تفاعلي" : "Deliverable Artifact");
+                  if (!loadedMem.length && !(showTimeline && tline.length) && !artId) return null;
+                  return (
+                    <div className="mt-1.5 space-y-1.5 border-t border-borderline/50 pt-1.5 text-[10px]">
+                      {loadedMem.length > 0 && (
+                        <div className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-primary" title={loadedMem.map((x) => x.content).join(" | ")}>
+                          <Brain className="h-3 w-3" />
+                          <span>{t("phase8.loaded_memory")}: {loadedMem.length}</span>
+                        </div>
+                      )}
+                      {artId && (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenArtifactPreview(artId, artTitle, artKind)}
+                          className="ms-1 inline-flex items-center gap-1 rounded-lg border border-primary/40 bg-primary/10 px-2.5 py-1 font-semibold text-primary hover:bg-primary/20"
+                        >
+                          <Layers className="h-3 w-3" />
+                          <span>{t("phase8.artifact_preview")}</span>
+                        </button>
+                      )}
+                      {showTimeline && tline.length > 0 && (
+                        <div className="space-y-0.5 rounded-lg border border-borderline bg-surface p-2 text-muted">
+                          {tline.map((step, i) => (
+                            <div key={`${step.stage || "s"}-${i}`}>• {step.label_ar || step.stage}</div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {(() => {
                   const shots = (m.card_payload?.screenshots as string[] | undefined) || [];
@@ -684,7 +972,26 @@ export default function ChatHomePage() {
           <div ref={endRef} />
         </div>
 
-        {/* Composer */}
+        {/* Mid-run Steer & Composer */}
+        {activeId && (
+          <form onSubmit={handleSteerSubmit} className="flex gap-2 border-t border-borderline/60 bg-canvas/50 px-3 py-1.5">
+            <input
+              type="text"
+              value={steerInput}
+              onChange={(e) => setSteerInput(e.target.value)}
+              placeholder={t("phase8.steer_ph")}
+              className="flex-1 rounded-lg border border-borderline bg-surface px-2.5 py-1 text-[11px] outline-none focus:border-primary"
+            />
+            <button
+              type="submit"
+              disabled={!steerInput.trim()}
+              className="rounded-lg border border-primary/40 bg-primary/10 px-3 py-1 text-[11px] font-semibold text-primary disabled:opacity-40"
+            >
+              {t("phase8.steer_btn")}
+            </button>
+          </form>
+        )}
+
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -692,6 +999,16 @@ export default function ChatHomePage() {
           }}
           className="flex gap-2 border-t border-borderline p-3"
         >
+          <button
+            type="button"
+            onClick={handleVoiceDictation}
+            title={t("phase8.voice_mic")}
+            className={`inline-flex items-center justify-center rounded-xl border px-3 py-2 text-xs ${
+              listeningVoice ? "border-danger bg-danger/10 text-danger" : "border-borderline bg-canvas text-muted hover:text-primary"
+            }`}
+          >
+            <Mic className="h-4 w-4" />
+          </button>
           <input
             type="text"
             value={input}

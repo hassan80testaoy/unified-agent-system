@@ -79,6 +79,11 @@ class ChatThread(Base, TimestampMixin):
     ndjson_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     compacted_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="idle", nullable=False)
+    autonomy_mode: Mapped[str] = mapped_column(String(24), default="checkpoint", nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    paused: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    pending_steering_json: Mapped[list[dict[str, Any]]] = mapped_column(PortableJSON, default=list, nullable=False)
+    loaded_memory_ids_json: Mapped[list[str]] = mapped_column(PortableJSON, default=list, nullable=False)
 
 
 class ChatMessage(Base, TimestampMixin):

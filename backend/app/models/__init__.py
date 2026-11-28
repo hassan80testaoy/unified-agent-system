@@ -97,6 +97,20 @@ from app.models.phase7 import (
     SiteAudit,
     WakeEventLog,
 )
+from app.models.phase8 import (
+    AgentDelegationTask,
+    BacklinkLibrarySite,
+    BacklinkPlacement,
+    EvalRun,
+    MessagingConversationMap,
+    MessagingEventLog,
+    MessagingGatewayConfig,
+    PlatformProject,
+    PluginCatalogInstall,
+    SelfDevProposal,
+    TargetSiteProject,
+    WideResearchJob,
+)
 
 __all__ = [
     "User",
@@ -178,4 +192,16 @@ __all__ = [
     "HypnosFeedbackEvent",
     "HypnosLoraVersion",
     "CodeReviewItem",
+    "TargetSiteProject",
+    "BacklinkLibrarySite",
+    "BacklinkPlacement",
+    "MessagingGatewayConfig",
+    "MessagingConversationMap",
+    "MessagingEventLog",
+    "AgentDelegationTask",
+    "PlatformProject",
+    "WideResearchJob",
+    "PluginCatalogInstall",
+    "SelfDevProposal",
+    "EvalRun",
 ]

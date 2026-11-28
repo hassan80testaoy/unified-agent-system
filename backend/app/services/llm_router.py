@@ -32,7 +32,9 @@ from app.models.agents import AgentModel, Run
 from app.models.providers import AgentProviderAssignment, ApiKey, LlmCall, Provider, ProviderAccount, RoleModelAssignment
 from app.security.crypto import decrypt_secret
 from app.security.killswitch import is_killswitch_active
-from app.security.sanitizer import scrub_text
+from app.security.sanitizer import scrub_text, scrub_value
+from app.services.chat_output_guard import sanitize_chat_output
+from app.services.loop_guard import RunawayToolCallGuard
 from app.services.runtime_checks import is_local_endpoint
 
 
@@ -294,7 +296,9 @@ def _call_provider_http(
     system_prompt: str,
     json_schema: dict[str, Any] | None = None,
 ) -> tuple[str, int, int]:
-    """Call provider HTTP API or deterministic offline mock provider."""
+    """Call provider HTTP API or deterministic offline mock provider (Vault secrets strictly scrubbed)."""
+    prompt = scrub_text(prompt)
+    system_prompt = scrub_text(system_prompt)
     if provider.kind == "llm-mock":
         return _deterministic_mock_response(prompt, json_schema), max(12, len(prompt) // 4), 48
 
@@ -427,6 +431,8 @@ async def _stream_provider_http(
     system_prompt: str,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream tokens from provider API with SSE/NDJSON parsing; raises _StreamFallbackError to trigger fallback."""
+    prompt = scrub_text(prompt)
+    system_prompt = scrub_text(system_prompt)
     if provider.kind == "llm-mock":
         full = _deterministic_mock_response(prompt, None)
         words = full.split(" ")
@@ -1409,3 +1415,191 @@ class LLMRouter:
                     continue
 
         raise ProviderUnavailableError("All providers in streaming fallback chain failed or exceeded budget.")
+
+    def route_with_tools(
+        self,
+        *,
+        task_type: str,
+        tier: str = "cheap",
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        system_prompt: str = "You are a helpful Arabic-first AI platform assistant.",
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        preferred_provider: str | None = None,
+        preferred_model: str | None = None,
+        allow_mock_fallback: bool = True,
+    ) -> dict[str, Any]:
+        """Execute native OpenAI-compatible tool-calling (`tools`/`tool_calls`) with scrubbed payloads & runaway guard (§8.0.4)."""
+        clean_system = scrub_text(system_prompt)
+        clean_messages = scrub_value(messages)
+        candidates = self._candidate_providers(tier=tier, preferred_provider_id=preferred_provider)
+        if not allow_mock_fallback:
+            candidates = [c for c in candidates if c.kind != "llm-mock"]
+
+        guard = RunawayToolCallGuard(max_malformed=3)
+        last_err = ""
+        for prov in candidates:
+            model = (
+                preferred_model.strip()
+                if preferred_model and (not preferred_provider or preferred_provider == prov.id)
+                else ((prov.models_json or {}).get(tier) or (prov.models_json or {}).get("mid") or "auto")
+            )
+            if prov.kind == "llm-mock":
+                user_last = next((str(m.get("content") or "") for m in reversed(clean_messages) if m.get("role") == "user"), "")
+                txt, meta = sanitize_chat_output(_deterministic_mock_response(user_last, None))
+                return {
+                    "provider_id": prov.id,
+                    "model": model,
+                    "content": txt or "تم تنفيذ الطلب.",
+                    "tool_calls": [],
+                    "tokens_in": max(10, len(user_last) // 4),
+                    "tokens_out": max(8, len(txt) // 4),
+                    "cost_usd": 0.0,
+                    "is_mock": True,
+                    "guard_meta": meta,
+                }
+
+            protocol = getattr(prov, "protocol", "openai-completions") or "openai-completions"
+            if protocol != "openai-completions":
+                continue
+
+            api_key = _resolve_provider_api_key(self.db, self.workspace_id, prov)
+            allow_keyless_local = is_local_endpoint(prov.api_base) and prov.id in {"freellmapi", "free-claude-code"}
+            if not api_key and not allow_keyless_local:
+                continue
+
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            payload_msgs = [{"role": "system", "content": clean_system}] + clean_messages
+            payload: dict[str, Any] = {
+                "model": model,
+                "messages": scrub_value(payload_msgs),
+                "temperature": 0.2,
+            }
+            if tools:
+                payload["tools"] = tools
+                payload["tool_choice"] = "auto"
+
+            t0 = time.monotonic()
+            try:
+                with httpx.Client(timeout=45.0) as client:
+                    resp = client.post(f"{prov.api_base.rstrip('/')}/chat/completions", headers=headers, json=payload)
+                if resp.status_code >= 400:
+                    last_err = f"{prov.id}_http_{resp.status_code}"
+                    continue
+                body = resp.json()
+                actual_model = str(body.get("model") or model)
+                msg_obj = ((body.get("choices") or [{}])[0].get("message")) or {}
+                raw_content = str(msg_obj.get("content") or "")
+                native_calls: list[dict[str, Any]] = []
+                for tc in msg_obj.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    try:
+                        parsed_args = json.loads(fn.get("arguments") or "{}")
+                    except Exception:
+                        parsed_args = {}
+                    native_calls.append(
+                        {
+                            "id": tc.get("id") or f"call_{len(native_calls)+1}",
+                            "name": str(fn.get("name") or ""),
+                            "arguments": parsed_args if isinstance(parsed_args, dict) else {},
+                        }
+                    )
+
+                cleaned_text, meta = sanitize_chat_output(raw_content)
+                fallback_calls = [c for c in (meta.get("extracted_calls") or []) if isinstance(c, dict) and not c.get("malformed") and c.get("name")]
+                merged_calls = native_calls or fallback_calls
+
+                # Detect models emitting raw <tool_call> text instead of valid native calls
+                malformed_now = bool(meta.get("had_tool_markup") and not merged_calls)
+                if malformed_now:
+                    for _ in range(3):
+                        should_stop, stop_reason = guard.observe(raw_content, extracted_calls=len(merged_calls), native_calls=len(native_calls))
+                        if should_stop:
+                            return {
+                                "provider_id": prov.id,
+                                "model": actual_model,
+                                "content": cleaned_text or (stop_reason or "توقف آمن: تعذر تنفيذ نداءات الأدوات من هذا النموذج."),
+                                "tool_calls": [],
+                                "tokens_in": 0,
+                                "tokens_out": 0,
+                                "cost_usd": 0.0,
+                                "is_mock": False,
+                                "runaway_stopped": True,
+                            }
+
+                usage = body.get("usage") or {}
+                t_in = int(usage.get("prompt_tokens") or 0)
+                t_out = int(usage.get("completion_tokens") or 0)
+                cost = _estimate_cost(actual_model, t_in, t_out) or _estimate_cost(model, t_in, t_out)
+                self.db.add(
+                    LlmCall(
+                        workspace_id=self.workspace_id,
+                        run_id=run_id,
+                        agent_id=agent_id,
+                        route_id="native_tools",
+                        provider_id=prov.id,
+                        model=actual_model,
+                        tier=tier,
+                        task_type=task_type,
+                        tokens_in=t_in,
+                        tokens_out=t_out,
+                        cost_usd=cost,
+                        latency_ms=int((time.monotonic() - t0) * 1000),
+                        ok=True,
+                    )
+                )
+                self.db.flush()
+                return {
+                    "provider_id": prov.id,
+                    "model": actual_model,
+                    "content": cleaned_text,
+                    "tool_calls": merged_calls,
+                    "tokens_in": t_in,
+                    "tokens_out": t_out,
+                    "cost_usd": cost,
+                    "is_mock": False,
+                    "guard_meta": meta,
+                }
+            except Exception as exc:
+                last_err = str(exc)
+                continue
+
+        raise ProviderUnavailableError(last_err or "No provider supported tool call routing.")
+
+
+def get_session_cost_summary(db: Session, workspace_id: str, *, since_hours: int = 24) -> dict[str, Any]:
+    """Per-session/model token & cost tracking summary with model-specific rate cards (§8H.6)."""
+    cutoff = utcnow() - timedelta(hours=since_hours)
+    rows = (
+        db.query(LlmCall)
+        .filter(LlmCall.workspace_id == workspace_id, LlmCall.created_at >= cutoff)
+        .order_by(LlmCall.created_at.desc())
+        .all()
+    )
+    by_model: dict[str, dict[str, Any]] = {}
+    tot_in = 0
+    tot_out = 0
+    tot_cost = 0.0
+    for r in rows:
+        tot_in += int(r.tokens_in or 0)
+        tot_out += int(r.tokens_out or 0)
+        tot_cost += float(r.cost_usd or 0.0)
+        bucket = by_model.setdefault(
+            r.model,
+            {"provider_id": r.provider_id, "model": r.model, "calls": 0, "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0},
+        )
+        bucket["calls"] += 1
+        bucket["tokens_in"] += int(r.tokens_in or 0)
+        bucket["tokens_out"] += int(r.tokens_out or 0)
+        bucket["cost_usd"] = round(bucket["cost_usd"] + float(r.cost_usd or 0.0), 6)
+    return {
+        "window_hours": since_hours,
+        "total_calls": len(rows),
+        "tokens_in": tot_in,
+        "tokens_out": tot_out,
+        "cost_usd": round(tot_cost, 6),
+        "by_model": list(by_model.values()),
+    }

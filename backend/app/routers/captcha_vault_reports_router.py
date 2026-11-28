@@ -216,47 +216,6 @@ def list_vault_items(auth: AuthContext = Depends(get_current_auth), db: Session 
     }
 
 
-@router.get("/api/memory")
-def list_memory(auth: AuthContext = Depends(get_current_auth), db: Session = Depends(get_db)):
-    rows = db.query(MemoryFact).filter(MemoryFact.workspace_id == auth.workspace.id).order_by(MemoryFact.created_at.desc()).all()
-    return {
-        "memory": [
-            {
-                "id": m.id,
-                "category": m.category,
-                "content": decrypt_secret(m.content_enc),
-                "allow_training": m.allow_training,
-                "created_at": m.created_at.isoformat(),
-            }
-            for m in rows
-        ]
-    }
-
-
-@router.post("/api/memory")
-def add_memory(req: MemoryCreateRequest, auth: AuthContext = Depends(get_current_auth), db: Session = Depends(get_db)):
-    row = MemoryFact(
-        workspace_id=auth.workspace.id,
-        user_id=auth.user.id,
-        category=req.category,
-        content_enc=encrypt_secret(req.content),
-        allow_training=bool(req.allow_training),
-    )
-    db.add(row)
-    db.commit()
-    return {"id": row.id}
-
-
-@router.delete("/api/memory/{memory_id}")
-def delete_memory(memory_id: str, auth: AuthContext = Depends(get_current_auth), db: Session = Depends(get_db)):
-    row = db.get(MemoryFact, memory_id)
-    if not row or row.workspace_id != auth.workspace.id:
-        raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "غير موجود", "message_en": "Not found"})
-    db.delete(row)
-    db.commit()
-    return {"ok": True}
-
-
 @router.get("/api/reports")
 def list_reports(auth: AuthContext = Depends(get_current_auth), db: Session = Depends(get_db)):
     rows = db.query(Report).filter(Report.workspace_id == auth.workspace.id).order_by(Report.created_at.desc()).limit(50).all()

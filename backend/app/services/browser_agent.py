@@ -19,8 +19,11 @@ from app.models.mailboxes import Mailbox
 from app.security.crypto import decrypt_secret
 from app.security.sanitizer import discard_ephemeral_secret, register_ephemeral_secret, scrub_text
 from app.services.browser_worker_manager import resolve_browser_worker_url
+from app.services.chat_output_guard import sanitize_chat_output
 from app.services.llm_router import LLMRouter
+from app.services.loop_guard import LoopGuard, RunawayToolCallGuard
 from app.services.mailbox import fetch_and_find_verification_imap, find_verification_from_messages
+from app.services.memory_service import auto_writeback_memory, build_memory_context_block
 from app.services.proxy_health import is_proxy_limit_or_auth_failure, record_proxy_outcome
 from app.services.runtime_checks import get_runtime_readiness
 from app.services.session_log import append_turn
@@ -435,7 +438,48 @@ async def run_general_browser_agent(
 
     readiness = get_runtime_readiness(db, workspace_id)
     if not readiness.get("browser_worker"):
-        err = readiness.get("browser_worker_error") or "browser_worker_offline"
+        if is_search and query:
+            # HTTP search fallback when browser_worker is offline so real search queries return real links (never bare ack)
+            try:
+                with httpx.Client(timeout=12.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as hclient:
+                    sresp = hclient.get(f"https://html.duckduckgo.com/html/?q={quote_plus(query)}")
+                if sresp.status_code < 400 and sresp.text:
+                    import re as _re
+                    raw_matches = _re.findall(
+                        r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+                        sresp.text,
+                        flags=_re.I | _re.S,
+                    )
+                    raw_links = [
+                        {"href": href, "text": _re.sub(r"<[^>]+>", "", txt).strip()}
+                        for href, txt in raw_matches
+                    ]
+                    org = _filter_organic_links(raw_links, search_host="duckduckgo.com")
+                    if org:
+                        lines = [f"🔎 **نتائج البحث الحي عن:** `{query}` *(عبر HTTP المباشر)*", ""]
+                        for item in org[:8]:
+                            lines.append(f"- [{item['text']}]({item['href']})")
+                        return {
+                            "status": "completed",
+                            "is_mock": False,
+                            "network_path": "http_search",
+                            "current_url": f"https://html.duckduckgo.com/html/?q={quote_plus(query)}",
+                            "page_title": f"بحث: {query}",
+                            "screenshots": [],
+                            "links": org[:8],
+                            "stages": [{"step": 1, "tool": "http_search", "status": "ok", "detail": f"بحث ويب عن: {query}"}],
+                            "model_used": None,
+                            "latency_ms": 0,
+                            "report_ar": scrub_text("\n".join(lines)),
+                        }
+            except Exception as http_exc:
+                err_extra = f" | HTTP fallback error: {type(http_exc).__name__}"
+            else:
+                err_extra = ""
+        else:
+            err_extra = ""
+
+        err = (readiness.get("browser_worker_error") or "browser_worker_offline") + err_extra
         report_ar = (
             "⛔ **المتصفح الحقيقي غير متاح حالياً (توقف صادق بدون اختلاق):**\n"
             f"- حالة `browser_worker`: `false` ({err})\n"
@@ -579,7 +623,11 @@ async def run_general_browser_agent(
                 "- تم إيقاف الخطوة بأمان بانتظار الحل اليدوي عبر noVNC أو مزود الكابتشا المُعد في الإعدادات."
             )
 
-        # Iterative LLM tool loop (real Playwright state -> JSON tool choice)
+        # Iterative LLM tool loop (real Playwright state -> JSON tool choice) with Memory + LoopGuard (§8K, §8.0)
+        mem_ctx, _ = build_memory_context_block(db, workspace_id=workspace_id, user_id=user_id, query=clean_prompt, current_thread_id=thread_id)
+        browser_sys_prompt = _BROWSER_TOOL_SYSTEM_PROMPT + (f"\n\n{mem_ctx}" if mem_ctx else "")
+        loop_guard = LoopGuard()
+        runaway_guard = RunawayToolCallGuard(max_malformed=3)
         llm = LLMRouter(db, workspace_id)
         for _ in range(max(1, max_steps - step_counter)):
             if paused_status or (cancel_event and cancel_event.is_set()):
@@ -609,13 +657,17 @@ async def run_general_browser_agent(
                         "Decide your next single tool call JSON (`browser_open`, `browser_read`, `browser_click`, "
                         "`browser_type`, `browser_scroll`, `browser_screenshot`, `gmail_check_activation`, or `done`)."
                     ),
-                    system_prompt=_BROWSER_TOOL_SYSTEM_PROMPT,
+                    system_prompt=browser_sys_prompt,
                     use_cache=False,
                     allow_mock_fallback=True,
                 )
                 model_used = str(res.get("model") or model_used or "") or None
                 router_is_mock = bool(router_is_mock or res.get("is_mock"))
-                tool_choice = _extract_json_obj(str(res.get("raw_text") or ""))
+                raw_reply = str(res.get("raw_text") or "")
+                tool_choice = _extract_json_obj(raw_reply)
+                stop_runaway, _ = runaway_guard.observe(raw_reply, extracted_calls=1 if tool_choice else 0, native_calls=0)
+                if stop_runaway:
+                    break
             except Exception:
                 tool_choice = None
 
@@ -624,8 +676,12 @@ async def run_general_browser_agent(
 
             t_name = str(tool_choice.get("tool") or "done").strip()
             t_args = dict(tool_choice.get("args") or {})
+            decision, _ = loop_guard.record_step(tool_calls=[{"name": t_name, "args": t_args}])
+            if decision == "stop":
+                break
             if t_name == "done":
-                summary_override = str(t_args.get("summary_ar") or "").strip() or None
+                cleaned_sum, _ = sanitize_chat_output(str(t_args.get("summary_ar") or "").strip())
+                summary_override = cleaned_sum or None
                 break
 
             step_counter += 1

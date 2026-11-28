@@ -85,6 +85,18 @@ BUILTIN_MODES: list[dict[str, Any]] = [
         "approval_policy": "ask_first",
         "is_default": False,
     },
+    {
+        "key": "architect",
+        "name_ar": "المعماري (مرحلتين)",
+        "name_en": "Architect",
+        "description_ar": "وضع الهندسة المعمارية على مرحلتين (Hermes §8H.4): يصمم الخطة والبنية أولاً ثم يفوض التنفيذ بوضوح.",
+        "description_en": "Two-step Architect mode: design clean architecture first, then implement after confirmation.",
+        "system_prompt": "You are in Architect mode (two-step plan-then-implement). Produce a clear architectural blueprint and file change plan BEFORE making edits.",
+        "tool_allowlist": ["read", "search", "repo_map", "plan", "write", "edit", "test"],
+        "sandbox_mode": "workspace-write",
+        "approval_policy": "ask_first",
+        "is_default": False,
+    },
 ]
 
 

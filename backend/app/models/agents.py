@@ -31,6 +31,13 @@ class AgentModel(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     category: Mapped[str] = mapped_column(String(48), default="seo", nullable=False)
     priority: Mapped[str] = mapped_column(String(8), default="P0", nullable=False)
+    provider_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model_name: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    mode_key: Mapped[str] = mapped_column(String(64), default="delegate", nullable=False)
+    skills_json: Mapped[list[str]] = mapped_column(PortableJSON, default=list, nullable=False)
+    system_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    is_custom: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="active", nullable=False)
 
 
 class AgentSetting(Base, TimestampMixin):

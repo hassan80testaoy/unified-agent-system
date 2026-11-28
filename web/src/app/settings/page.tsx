@@ -200,6 +200,25 @@ export default function SettingsPage() {
   const [mcpOauthClientId, setMcpOauthClientId] = useState("");
   const [mcpOauthRefreshTok, setMcpOauthRefreshTok] = useState("");
 
+  // Phase 8: Browser Mode, Manus Projects, Wide Research, Commit-Pinned Plugins, Eval Harness
+  const [browserMode, setBrowserMode] = useState<"cloud" | "local_operator">("cloud");
+  const [platformProjects, setPlatformProjects] = useState<
+    Array<{ id: string; name: string; slug: string; autonomy_mode: string; sandbox_dir: string }>
+  >([]);
+  const [newProjName, setNewProjName] = useState("");
+  const [newProjInstr, setNewProjInstr] = useState("");
+  const [wideJobs, setWideJobs] = useState<
+    Array<{ id: string; query: string; progress_done: number; progress_total: number; status: string }>
+  >([]);
+  const [wideQuery, setWideQuery] = useState("");
+  const [wideItemsRaw, setWideItemsRaw] = useState("");
+  const [pluginCatalog, setPluginCatalog] = useState<
+    Array<{ slug: string; name: string; category: string; pinned_commit: string; installed: boolean; description_ar: string; description_en: string }>
+  >([]);
+  const [evalRuns, setEvalRuns] = useState<
+    Array<{ id: string; suite_name: string; score: number; passed_count: number; total_count: number; delta_vs_prev: number }>
+  >([]);
+
   const load = () => {
     apiFetch<{ providers: ProviderItem[] }>("/api/providers")
       .then((r) => {
@@ -244,6 +263,62 @@ export default function SettingsPage() {
     apiFetch<typeof plannerBrain>("/api/routing/planner-brain").then(setPlannerBrain).catch(() => null);
     apiFetch<typeof hypnosState>("/api/hypnos/status").then(setHypnosState).catch(() => null);
     apiFetch<typeof connectors>("/api/connectors/summary").then(setConnectors).catch(() => null);
+    apiFetch<{ mode: "cloud" | "local_operator" }>("/api/browser/mode").then((r) => setBrowserMode(r.mode || "cloud")).catch(() => null);
+    apiFetch<{ projects: typeof platformProjects }>("/api/projects").then((r) => setPlatformProjects(r.projects || [])).catch(() => null);
+    apiFetch<{ jobs: typeof wideJobs }>("/api/research/wide").then((r) => setWideJobs(r.jobs || [])).catch(() => null);
+    apiFetch<{ catalog: typeof pluginCatalog }>("/api/plugins/catalog").then((r) => setPluginCatalog(r.catalog || [])).catch(() => null);
+    apiFetch<{ runs: typeof evalRuns }>("/api/evals").then((r) => setEvalRuns(r.runs || [])).catch(() => null);
+  };
+
+  const toggleBrowserMode = async (mode: "cloud" | "local_operator") => {
+    const res = await apiFetch<{ mode: "cloud" | "local_operator" }>("/api/browser/mode", {
+      method: "PUT",
+      body: JSON.stringify({ mode }),
+    });
+    setBrowserMode(res.mode);
+  };
+
+  const createPlatformProject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newProjName.trim()) return;
+    await apiFetch("/api/projects", {
+      method: "POST",
+      body: JSON.stringify({ name: newProjName.trim(), instructions_md: newProjInstr.trim(), autonomy_mode: "checkpoint" }),
+    });
+    setNewProjName("");
+    setNewProjInstr("");
+    load();
+  };
+
+  const startWideResearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const items = wideItemsRaw.split(",").map((s) => s.trim()).filter(Boolean).slice(0, 20);
+    if (!wideQuery.trim() || items.length === 0) return;
+    await apiFetch("/api/research/wide", {
+      method: "POST",
+      body: JSON.stringify({ query: wideQuery.trim(), items }),
+    });
+    setWideQuery("");
+    setWideItemsRaw("");
+    load();
+  };
+
+  const installCatalogPlugin = async (slug: string) => {
+    await apiFetch(`/api/plugins/catalog/${slug}/install`, { method: "POST" });
+    setStatusMsg(locale === "ar" ? `تم تثبيت الإضافة المثبتة (${slug})` : `Installed commit-pinned plugin ${slug}`);
+    load();
+  };
+
+  const runEvalSuite = async () => {
+    const res = await apiFetch<{ run: { score: number; passed_count: number; total_count: number } }>("/api/evals/run", {
+      method: "POST",
+    });
+    setStatusMsg(
+      locale === "ar"
+        ? `نتيجة Eval Harness: ${res.run.score}% (${res.run.passed_count}/${res.run.total_count})`
+        : `Eval Harness: ${res.run.score}% (${res.run.passed_count}/${res.run.total_count})`
+    );
+    load();
   };
 
   const saveProviderBaseUrl = async (providerId: string) => {
@@ -1623,6 +1698,107 @@ export default function SettingsPage() {
             </div>
           </form>
         )}
+      </section>
+
+      {/* 2f. Phase 8 Platform Hub: Grok (xAI) + Browser Mode + Projects & Wide Research + Pinned Plugins + Eval Harness */}
+      <section id="platform-hub" className="rounded-xl border border-borderline bg-surface p-4 space-y-5 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-bold">
+              {locale === "ar" ? "لوحة المنصة الشاملة: Grok xAI، وضع المتصفح، المشاريع، البحث المتوازي وEval Harness" : "Platform Controls: Grok (xAI), Browser Mode, Projects, Wide Research & Evals"}
+            </h2>
+            <p className="text-muted">
+              {locale === "ar"
+                ? "تمت إضافة Grok (xAI — XAI_API_KEY) لقائمة مزودي API في Settings، مع دعم Image API (OpenAI / OpenRouter / xAI)."
+                : "Grok (xAI — XAI_API_KEY) and Image Generation endpoints are active in Provider Settings."}
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5 rounded-lg border border-borderline bg-canvas p-1">
+            <button
+              type="button"
+              onClick={() => toggleBrowserMode("cloud")}
+              className={`rounded-md px-2.5 py-1 font-semibold ${browserMode === "cloud" ? "bg-primary text-white" : "text-muted"}`}
+            >
+              {locale === "ar" ? "متصفح الخادم (Cloud)" : "Cloud Browser"}
+            </button>
+            <button
+              type="button"
+              onClick={() => toggleBrowserMode("local_operator")}
+              className={`rounded-md px-2.5 py-1 font-semibold ${browserMode === "local_operator" ? "bg-primary text-white" : "text-muted"}`}
+            >
+              {locale === "ar" ? "المتصفح المحلي (Operator)" : "Local Operator"}
+            </button>
+          </div>
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="space-y-2 rounded-xl border border-borderline bg-canvas p-3">
+            <div className="font-bold">{locale === "ar" ? "المشاريع الدائمة (Sandbox + Instructions)" : "Persistent Projects (Manus pattern)"}</div>
+            <form onSubmit={createPlatformProject} className="grid gap-2 sm:grid-cols-3">
+              <input value={newProjName} onChange={(e) => setNewProjName(e.target.value)} placeholder={locale === "ar" ? "اسم المشروع" : "Project name"} className="rounded border border-borderline bg-surface px-2.5 py-1.5" />
+              <input value={newProjInstr} onChange={(e) => setNewProjInstr(e.target.value)} placeholder={locale === "ar" ? "تعليمات المشروع" : "Instructions"} className="rounded border border-borderline bg-surface px-2.5 py-1.5" />
+              <button type="submit" className="rounded bg-primary px-3 py-1.5 font-semibold text-white">{t("common.save")}</button>
+            </form>
+            {platformProjects.slice(0, 4).map((p) => (
+              <div key={p.id} className="flex items-center justify-between rounded bg-surface px-2.5 py-1.5">
+                <span className="font-semibold">{p.name}</span>
+                <span className="font-mono text-[10px] text-muted">{p.autonomy_mode}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="space-y-2 rounded-xl border border-borderline bg-canvas p-3">
+            <div className="font-bold">{locale === "ar" ? "البحث الواسع المتوازي (حتى 20 عنصر)" : "Wide Research Fan-Out (<=20 items)"}</div>
+            <form onSubmit={startWideResearch} className="grid gap-2 sm:grid-cols-3">
+              <input value={wideQuery} onChange={(e) => setWideQuery(e.target.value)} placeholder={locale === "ar" ? "موضوع المقارنة" : "Research query"} className="rounded border border-borderline bg-surface px-2.5 py-1.5" />
+              <input value={wideItemsRaw} onChange={(e) => setWideItemsRaw(e.target.value)} placeholder="item1, item2, item3" className="rounded border border-borderline bg-surface px-2.5 py-1.5" />
+              <button type="submit" className="rounded bg-primary px-3 py-1.5 font-semibold text-white">{locale === "ar" ? "تشغيل متوازي" : "Run Fan-Out"}</button>
+            </form>
+            {wideJobs.slice(0, 4).map((j) => (
+              <div key={j.id} className="flex items-center justify-between rounded bg-surface px-2.5 py-1.5">
+                <span className="truncate">{j.query}</span>
+                <span className="font-mono text-[10px] text-primary">{j.progress_done}/{j.progress_total} ({j.status})</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="space-y-2 rounded-xl border border-borderline bg-canvas p-3">
+            <div className="font-bold">{locale === "ar" ? "كتالوج الإضافات المثبتة بـ Commit Hash" : "Commit-Pinned Plugin Catalog"}</div>
+            {pluginCatalog.map((pl) => (
+              <div key={pl.slug} className="flex items-center justify-between gap-2 rounded bg-surface px-2.5 py-1.5">
+                <div>
+                  <span className="font-semibold">{pl.name}</span>
+                  <span className="ms-1.5 font-mono text-[10px] text-muted">@{pl.pinned_commit.slice(0, 8)}</span>
+                </div>
+                <button
+                  type="button"
+                  disabled={pl.installed}
+                  onClick={() => installCatalogPlugin(pl.slug)}
+                  className="rounded border border-primary/40 px-2 py-0.5 font-semibold text-primary disabled:opacity-50"
+                >
+                  {pl.installed ? (locale === "ar" ? "مثبتة" : "Installed") : (locale === "ar" ? "تثبيت" : "Install")}
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div className="space-y-2 rounded-xl border border-borderline bg-canvas p-3">
+            <div className="flex items-center justify-between">
+              <span className="font-bold">{locale === "ar" ? "مقياس الجودة التلقائي (Eval Harness)" : "Platform Eval Harness"}</span>
+              <button type="button" onClick={runEvalSuite} className="rounded bg-primary px-3 py-1 font-semibold text-white">
+                {locale === "ar" ? "تشغيل القياس الآن" : "Run Eval Suite"}
+              </button>
+            </div>
+            {evalRuns.slice(0, 4).map((er) => (
+              <div key={er.id} className="flex items-center justify-between rounded bg-surface px-2.5 py-1.5 font-mono text-[11px]">
+                <span>{er.suite_name} · {er.passed_count}/{er.total_count}</span>
+                <span>score={er.score}% (Δ{er.delta_vs_prev >= 0 ? `+${er.delta_vs_prev}` : er.delta_vs_prev})</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </section>
 
       {/* 3. Manual CAPTCHA & noVNC Tunnel */}

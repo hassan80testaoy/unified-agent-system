@@ -147,7 +147,19 @@ export default function CodingAgentPage() {
 
   const [tab, setTab] = useState<WorkbenchTab>("live");
   const [newTitle, setNewTitle] = useState("");
+  const [newModeKey, setNewModeKey] = useState("delegate");
   const [promptInput, setPromptInput] = useState("");
+
+  // §8E + §8H Coding Platform additions (Repo Map, /test, /lint, Architect mode, @-mentions, Cost, Self-Dev)
+  const [repoMapText, setRepoMapText] = useState("");
+  const [showRepoMap, setShowRepoMap] = useState(false);
+  const [devCheckOut, setDevCheckOut] = useState<string>("");
+  const [sessionCost, setSessionCost] = useState<{ total_calls?: number; cost_usd?: number } | null>(null);
+  const [selfDevProposals, setSelfDevProposals] = useState<
+    Array<{ id: string; title: string; branch_name: string; diff_text: string; tests_passed: boolean; status: string; test_output: string }>
+  >([]);
+  const [selfDevPrompt, setSelfDevPrompt] = useState("");
+  const [selfDevTarget, setSelfDevTarget] = useState("");
   const [selectedDesign, setSelectedDesign] = useState(0);
   const [previewWidth, setPreviewWidth] = useState<"375px" | "768px" | "100%">("100%");
   const [todoDraft, setTodoDraft] = useState<TodoItem[]>([]);
@@ -194,14 +206,18 @@ export default function CodingAgentPage() {
   }, [selectedId]);
 
   const loadGlobals = useCallback(async () => {
-    const [gRes, hRes, cRes] = await Promise.all([
+    const [gRes, hRes, cRes, costRes, sdRes] = await Promise.all([
       apiFetch<{ goals: GoalItem[] }>("/api/goals"),
       apiFetch<{ hooks: HookItem[] }>("/api/hooks"),
       apiFetch<typeof cliStatus>("/api/coding/cli-status").catch(() => null),
+      apiFetch<{ total_calls?: number; cost_usd?: number }>("/api/stats/session-cost").catch(() => null),
+      apiFetch<{ proposals: typeof selfDevProposals }>("/api/self-dev/proposals").catch(() => ({ proposals: [] })),
     ]);
     setGoals(gRes.goals || []);
     setHooks(hRes.hooks || []);
     if (cRes) setCliStatus(cRes);
+    if (costRes) setSessionCost(costRes);
+    setSelfDevProposals(sdRes.proposals || []);
   }, []);
 
   const loadThreadDetail = useCallback(async (id: string) => {
@@ -287,7 +303,7 @@ export default function CodingAgentPage() {
         method: "POST",
         body: JSON.stringify({
           title: newTitle.trim() || (isAr ? "مهمة برمجة جديدة" : "New coding task"),
-          mode_key: "delegate",
+          mode_key: newModeKey,
         }),
       });
       setNewTitle("");
@@ -295,6 +311,75 @@ export default function CodingAgentPage() {
       setSelectedId(res.thread.id);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleFetchRepoMap() {
+    const res = await apiFetch<{ map_text: string }>(`/api/dev/repo-map?query=${encodeURIComponent(promptInput.slice(0, 80))}`).catch(() => null);
+    if (res?.map_text) {
+      setRepoMapText(res.map_text);
+      setShowRepoMap(true);
+    }
+  }
+
+  async function handleRunDevCheck(action: "test" | "lint") {
+    setBusy(true);
+    try {
+      const res = await apiFetch<{ summary_ar: string }>("/api/dev/check", {
+        method: "POST",
+        body: JSON.stringify({ action }),
+      });
+      setDevCheckOut(res.summary_ar || action);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleProposeSelfDev(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selfDevPrompt.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await apiFetch<{ proposal: { status: string; title: string } }>("/api/self-dev/propose", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt: selfDevPrompt.trim(),
+          target_rel_path: selfDevTarget.trim() || null,
+          thread_id: thread?.id || null,
+        }),
+      });
+      setSelfDevPrompt("");
+      setSelfDevTarget("");
+      setNotice(
+        res.proposal.status === "blocked"
+          ? isAr
+            ? "تم حظر التعديل بواسطة حماية §0 (ملفات الكابتشا والإعدادات محمية)."
+            : "Blocked by §0 protection guard."
+          : isAr
+          ? `تم تجهيز اقتراح التطوير الذاتي في Worktree معزول: ${res.proposal.title}`
+          : `Created isolated worktree self-dev proposal: ${res.proposal.title}`
+      );
+      await loadGlobals();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDecideSelfDev(id: string, approve: boolean) {
+    setBusy(true);
+    try {
+      await apiFetch(`/api/self-dev/proposals/${id}/decide`, {
+        method: "POST",
+        body: JSON.stringify({ approve, commit_in_worktree: approve }),
+      });
+      await loadGlobals();
     } finally {
       setBusy(false);
     }
@@ -513,7 +598,35 @@ export default function CodingAgentPage() {
               <p className="text-xs text-slate-400">{t("coding.subtitle")}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <button
+              type="button"
+              onClick={handleFetchRepoMap}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-slate-200 hover:border-emerald-500"
+            >
+              {isAr ? "خريطة الكود (Repo Map)" : "Repo Map"}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleRunDevCheck("test")}
+              disabled={busy}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 font-mono text-emerald-300 hover:border-emerald-500"
+            >
+              /test
+            </button>
+            <button
+              type="button"
+              onClick={() => handleRunDevCheck("lint")}
+              disabled={busy}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 font-mono text-sky-300 hover:border-sky-500"
+            >
+              /lint
+            </button>
+            {sessionCost && (
+              <span className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 font-mono text-slate-300">
+                <bdi dir="ltr">${(sessionCost.cost_usd || 0).toFixed(4)}</bdi>
+              </span>
+            )}
             <span className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 font-mono text-emerald-300">
               {t("coding.parallel_cap")}: {activeRunning}/{maxParallel}
             </span>
@@ -531,6 +644,22 @@ export default function CodingAgentPage() {
           </div>
         )}
 
+        {showRepoMap && repoMapText && (
+          <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-xs">
+            <div className="mb-1.5 flex items-center justify-between font-bold text-emerald-300">
+              <span>{isAr ? "خريطة الكود المختصرة (Aider Repo Map)" : "Token-Budgeted Repo Map"}</span>
+              <button type="button" onClick={() => setShowRepoMap(false)} className="text-slate-400 hover:text-white">✕</button>
+            </div>
+            <pre dir="ltr" className="max-h-56 overflow-auto font-mono text-[11px] text-slate-300">{repoMapText}</pre>
+          </div>
+        )}
+
+        {devCheckOut && (
+          <div className="rounded-xl border border-sky-500/40 bg-slate-950 p-3 text-xs text-slate-200">
+            <div className="whitespace-pre-wrap">{devCheckOut}</div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
           {/* Agent Manager Sidebar */}
           <aside className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/60 p-3 lg:col-span-3">
@@ -544,6 +673,16 @@ export default function CodingAgentPage() {
                 placeholder={t("coding.thread_title_ph")}
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100"
               />
+              <select
+                value={newModeKey}
+                onChange={(e) => setNewModeKey(e.target.value)}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-200"
+              >
+                <option value="delegate">delegate</option>
+                <option value="architect">{isAr ? "معماري + منفّذ (Architect)" : "Architect (Plan -> Edit)"}</option>
+                <option value="code">code</option>
+                <option value="ask">ask</option>
+              </select>
               <button
                 type="submit"
                 disabled={busy}
@@ -767,7 +906,19 @@ export default function CodingAgentPage() {
                         )}
                       </div>
 
-                      {/* Prompt Input */}
+                      {/* Prompt Input + @-mentions */}
+                      <div className="flex flex-wrap gap-1.5">
+                        {["@file:", "@diff", "@Git-Log", "@tree", "@problems"].map((chip) => (
+                          <button
+                            key={chip}
+                            type="button"
+                            onClick={() => setPromptInput((prev) => (prev ? `${prev} ${chip}` : chip))}
+                            className="rounded border border-slate-700 bg-slate-950 px-2 py-0.5 font-mono text-[10px] text-emerald-300 hover:border-emerald-500"
+                          >
+                            {chip}
+                          </button>
+                        ))}
+                      </div>
                       <form onSubmit={handleSendPrompt} className="flex gap-2">
                         <input
                           value={promptInput}
@@ -1105,6 +1256,61 @@ export default function CodingAgentPage() {
               </>
             )}
           </section>
+        </div>
+
+        {/* §8E Isolated Self-Development Worktree Section */}
+        <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-xs">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="flex items-center gap-2 text-sm font-bold text-slate-100">
+              <GitMerge className="h-4 w-4 text-emerald-400" />
+              <span>{isAr ? "التطوير الذاتي في Worktree معزول (§0 محمي — بدون لمس main)" : "Isolated Worktree Self-Development (§0 Protected)"}</span>
+            </h2>
+          </div>
+          <form onSubmit={handleProposeSelfDev} className="grid gap-2 sm:grid-cols-4">
+            <input
+              value={selfDevPrompt}
+              onChange={(e) => setSelfDevPrompt(e.target.value)}
+              placeholder={isAr ? "صف التحسين المطلوب إضافته للنظام..." : "Describe platform improvement..."}
+              className="sm:col-span-2 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            />
+            <input
+              dir="ltr"
+              value={selfDevTarget}
+              onChange={(e) => setSelfDevTarget(e.target.value)}
+              placeholder="Optional target path (e.g. docs/note.md)"
+              className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-slate-200"
+            />
+            <button type="submit" disabled={busy} className="rounded-lg bg-emerald-600 px-3 py-2 font-semibold text-white hover:bg-emerald-500">
+              {isAr ? "إنشاء Worktree + Diff" : "Propose in Worktree"}
+            </button>
+          </form>
+          {selfDevProposals.length > 0 && (
+            <div className="space-y-2">
+              {selfDevProposals.slice(0, 6).map((p) => (
+                <div key={p.id} className="space-y-1.5 rounded-lg border border-slate-800 bg-slate-950 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold text-slate-100">{p.title}</span>
+                    <span className="font-mono text-[10px] text-emerald-400">{p.branch_name || "blocked"} · {p.status} · tests:{p.tests_passed ? "PASS" : "FAIL"}</span>
+                  </div>
+                  {p.diff_text && (
+                    <pre dir="ltr" className="max-h-32 overflow-auto rounded bg-slate-900 p-2 font-mono text-[10px] text-slate-300">
+                      {p.diff_text}
+                    </pre>
+                  )}
+                  {p.status === "awaiting_approval" && (
+                    <div className="flex gap-2">
+                      <button type="button" onClick={() => handleDecideSelfDev(p.id, true)} className="rounded bg-emerald-600 px-3 py-1 font-semibold text-white">
+                        {t("common.approve")}
+                      </button>
+                      <button type="button" onClick={() => handleDecideSelfDev(p.id, false)} className="rounded border border-rose-500/40 px-3 py-1 text-rose-300">
+                        {t("common.reject")}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
   );

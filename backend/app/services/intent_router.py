@@ -109,13 +109,23 @@ _BROWSER_KEYWORDS = (
     "روح على",
     "تصفح",
     "شوف موقع",
+    "شوفلي",
     "زور موقع",
     "زيارة موقع",
     "دوّر على",
     "دور على",
+    "دورلي",
+    "دور لي",
     "ابحث عن",
+    "ابحثلي",
+    "ابحث لي",
     "ابحث في",
+    "بحث عن",
     "بحث في جوجل",
+    "هاتلي رابط",
+    "رابط شركة",
+    "موقع شركة",
+    "صفحة منتج",
     "سجّل في",
     "سجل في",
     "سجل حساب",
@@ -131,6 +141,9 @@ _BROWSER_KEYWORDS = (
     "navigate to",
     "search for",
     "search on",
+    "search ",
+    "find website",
+    "find company",
     "look up",
     "google",
     "screenshot",
@@ -139,6 +152,11 @@ _BROWSER_KEYWORDS = (
 )
 
 _SEARCH_PREFIXES = (
+    "ابحثلي عن",
+    "ابحث لي عن",
+    "دورلي على",
+    "دور لي على",
+    "هاتلي رابط",
     "دوّر على",
     "دور على",
     "ابحث عن",
@@ -148,6 +166,7 @@ _SEARCH_PREFIXES = (
     "search for",
     "search ",
     "look up",
+    "find ",
 )
 
 _SITE_NAME_HINTS = {
@@ -203,11 +222,51 @@ def classify_intent(text: str) -> dict[str, Any]:
             if q_tail:
                 entities["query"] = q_tail
             break
+    if "query" not in entities and any(k in lower for k in ("ابحث", "دورل", "شركة", "منتج", "search", "find ")):
+        entities["query"] = clean[:180]
 
     for alias, hint in _SITE_NAME_HINTS.items():
         if alias in lower:
             entities.setdefault("site_hint", hint)
             break
+
+    # 0. Explicit Phase 8 platform actions & slash commands
+    if lower.startswith("/test") or lower in {"test", "شغل الاختبارات"}:
+        return {"intent": "slash_test", "confidence": 0.99, "matched_rule": "/test", "entities": entities}
+    if lower.startswith("/lint") or lower == "lint":
+        return {"intent": "slash_lint", "confidence": 0.99, "matched_rule": "/lint", "entities": entities}
+    if lower.startswith("/git-undo"):
+        return {"intent": "slash_git_undo", "confidence": 0.99, "matched_rule": "/git-undo", "entities": entities}
+
+    for kw in ("لقائمة الباك لينك", "لمكتبة الباك لينك", "أضف موقع باك لينك", "add to backlink library"):
+        if kw in lower:
+            return {"intent": "add_backlink_site", "confidence": 0.97, "matched_rule": kw, "entities": entities}
+    if "ضيف موقع" in lower and ("باك لينك" in lower or domains or full_urls):
+        return {"intent": "add_backlink_site", "confidence": 0.96, "matched_rule": "ضيف موقع", "entities": entities}
+
+    for kw in ("سجّل مهارة", "سجل مهارة", "مهارة جديدة", "register skill", "create skill", "add skill"):
+        if kw in lower:
+            return {"intent": "register_skill", "confidence": 0.97, "matched_rule": kw, "entities": entities}
+
+    for kw in ("طوّر النظام", "طور النظام", "طوّر في النظام", "طور في النظام", "عدّل في النظام", "عدل في النظام", "ضيف زر", "أضف زر", "ضيف ميزة في النظام", "self-develop", "develop the system"):
+        if kw in lower:
+            return {"intent": "self_develop", "confidence": 0.97, "matched_rule": kw, "entities": entities}
+
+    for kw in ("اعمل صورة", "ارسم صورة", "انشئ صورة", "أنشئ صورة", "ولد صورة", "generate image", "create image", "draw image"):
+        if kw in lower:
+            return {"intent": "generate_image", "confidence": 0.97, "matched_rule": kw, "entities": entities}
+
+    for kw in ("بحث موسع", "ابحث بالتوازي", "wide research"):
+        if kw in lower:
+            return {"intent": "wide_research", "confidence": 0.96, "matched_rule": kw, "entities": entities}
+
+    for kw in ("أنشئ وكيل", "انشئ وكيل", "اعمل وكيل", "create agent", "new agent"):
+        if kw in lower:
+            return {"intent": "create_agent", "confidence": 0.96, "matched_rule": kw, "entities": entities}
+
+    for kw in ("ابني موقع", "ابني لي موقع", "انشئ تطبيق ويب", "أنشئ تطبيق ويب", "صمم موقع", "build website", "create web app", "build web app", "build a web app"):
+        if kw in lower:
+            return {"intent": "build_app", "confidence": 0.96, "matched_rule": kw, "entities": entities}
 
     # 1. Flights (explicitly NEVER mapped to backlink)
     for kw in _FLIGHTS_KEYWORDS:

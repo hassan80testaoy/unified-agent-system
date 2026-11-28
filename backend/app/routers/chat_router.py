@@ -20,7 +20,11 @@ from app.services.chat_agent import (
     cancel_active_stream,
     compact_thread,
     create_thread,
+    get_threads_live_status,
+    pause_thread_run,
     process_user_message,
+    resume_thread_run,
+    steer_thread_run,
     stream_user_message,
     undo_thread,
 )
@@ -36,12 +40,20 @@ class ThreadCreateRequest(BaseModel):
     mode_key: str = "delegate"
     project_key: str = "default"
     approval_mode: str = "ask_first"
+    autonomy_mode: str = "checkpoint"
+    agent_id: str | None = None
 
 
 class ThreadPatchRequest(BaseModel):
     title: str | None = None
     mode_key: str | None = None
     approval_mode: str | None = None
+    autonomy_mode: str | None = None
+    agent_id: str | None = None
+
+
+class ThreadSteerRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=8000)
 
 
 class ChatMessageCreateRequest(BaseModel):
@@ -62,6 +74,11 @@ def _serialize_thread(t: ChatThread) -> dict[str, Any]:
         "mode_key": t.mode_key,
         "project_key": t.project_key,
         "approval_mode": t.approval_mode,
+        "autonomy_mode": getattr(t, "autonomy_mode", "checkpoint"),
+        "agent_id": getattr(t, "agent_id", None),
+        "paused": bool(getattr(t, "paused", False)),
+        "pending_steering": list(getattr(t, "pending_steering_json", None) or []),
+        "loaded_memory_ids": list(getattr(t, "loaded_memory_ids_json", None) or []),
         "ndjson_path": t.ndjson_path,
         "compacted_summary": t.compacted_summary,
         "status": t.status,
@@ -85,6 +102,11 @@ def _serialize_message(m: ChatMessage) -> dict[str, Any]:
         "run_id": m.run_id,
         "created_at": m.created_at.isoformat(),
     }
+
+
+@router.get("/api/chat/threads/live-status")
+def threads_live_status_endpoint(auth: AuthContext = Depends(get_current_auth), db: Session = Depends(get_db)):
+    return {"threads": get_threads_live_status(db, auth.workspace.id)}
 
 
 @router.get("/api/chat/threads")
@@ -113,6 +135,8 @@ def create_chat_thread(
         mode_key=req.mode_key,
         project_key=req.project_key,
         approval_mode=req.approval_mode,
+        autonomy_mode=req.autonomy_mode,
+        agent_id=req.agent_id,
     )
     db.commit()
     db.refresh(thread)
@@ -157,8 +181,49 @@ def patch_chat_thread(
         t.mode_key = req.mode_key
     if req.approval_mode is not None:
         t.approval_mode = req.approval_mode
+    if req.autonomy_mode is not None and req.autonomy_mode in {"autonomous", "checkpoint", "supervised"}:
+        t.autonomy_mode = req.autonomy_mode
+    if req.agent_id is not None:
+        t.agent_id = req.agent_id or None
     db.commit()
     return {"thread": _serialize_thread(t)}
+
+
+@router.post("/api/chat/threads/{thread_id}/pause")
+def pause_chat_thread_endpoint(
+    thread_id: str,
+    auth: AuthContext = Depends(require_roles("owner", "admin", "member")),
+    db: Session = Depends(get_db),
+):
+    t = db.get(ChatThread, thread_id)
+    if not t or t.workspace_id != auth.workspace.id:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "المحادثة غير موجودة", "message_en": "Thread not found"})
+    return pause_thread_run(db, t)
+
+
+@router.post("/api/chat/threads/{thread_id}/resume")
+def resume_chat_thread_endpoint(
+    thread_id: str,
+    auth: AuthContext = Depends(require_roles("owner", "admin", "member")),
+    db: Session = Depends(get_db),
+):
+    t = db.get(ChatThread, thread_id)
+    if not t or t.workspace_id != auth.workspace.id:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "المحادثة غير موجودة", "message_en": "Thread not found"})
+    return resume_thread_run(db, t)
+
+
+@router.post("/api/chat/threads/{thread_id}/steer")
+def steer_chat_thread_endpoint(
+    thread_id: str,
+    req: ThreadSteerRequest,
+    auth: AuthContext = Depends(require_roles("owner", "admin", "member")),
+    db: Session = Depends(get_db),
+):
+    t = db.get(ChatThread, thread_id)
+    if not t or t.workspace_id != auth.workspace.id:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "المحادثة غير موجودة", "message_en": "Thread not found"})
+    return steer_thread_run(db, t, req.instruction, user_id=auth.user.id)
 
 
 @router.post("/api/chat/threads/{thread_id}/messages")

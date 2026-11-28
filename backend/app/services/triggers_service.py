@@ -117,6 +117,20 @@ def fire_trigger(
                 body=action_summary if status == "success" else (error_text or action_summary),
             )
         )
+    # Multi-channel cron delivery when requested in payload (§8H.7)
+    channels = [str(c) for c in ((payload or {}).get("delivery_channels") or []) if str(c).strip()]
+    if channels:
+        try:
+            from app.services.messaging_gateway import deliver_scheduled_summary
+
+            deliver_scheduled_summary(
+                db,
+                workspace_id=trigger.workspace_id,
+                channels=channels,
+                summary_text=f"⏰ {trigger.name}: {action_summary}",
+            )
+        except Exception:
+            pass
     db.flush()
     return log
 

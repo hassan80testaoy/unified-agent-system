@@ -7,17 +7,21 @@ import {
   Activity,
   Bell,
   Bot,
+  Brain,
   CheckSquare,
   Code2,
   FileBarChart,
+  FolderKanban,
   GitMerge,
   Globe,
   KeyRound,
+  Layers,
   LayoutDashboard,
   Link2,
   LogOut,
   Mail,
   Menu,
+  MessageCircle,
   MessageSquare,
   Moon,
   OctagonAlert,
@@ -25,6 +29,7 @@ import {
   PlusCircle,
   Search,
   Settings,
+  Sparkles,
   Sun,
   Target,
   Upload,
@@ -51,6 +56,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [unreadCount, setUnreadCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [authChecked, setAuthChecked] = useState(false);
+  const [targetProjects, setTargetProjects] = useState<Array<{ id: string; name: string; domain: string }>>([]);
 
   const isPublicPage = pathname === "/login" || pathname.startsWith("/vault/");
 
@@ -66,13 +72,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         if (cancelled) return;
         setMe(data);
         setAuthChecked(true);
-        const [ks, notes] = await Promise.all([
+        const [ks, notes, tProjs] = await Promise.all([
           apiFetch<{ active: boolean }>("/api/killswitch").catch(() => ({ active: false })),
           apiFetch<{ notifications: { read_at: string | null }[] }>("/api/notifications").catch(() => ({ notifications: [] })),
+          apiFetch<{ projects: Array<{ id: string; name: string; domain: string }> }>("/api/backlinks/targets/projects").catch(() => ({ projects: [] })),
         ]);
         if (!cancelled) {
           setKillswitchActive(Boolean(ks.active));
           setUnreadCount(notes.notifications.filter((n) => !n.read_at).length);
+          setTargetProjects(tProjs.projects || []);
         }
       } catch {
         if (!cancelled) {
@@ -102,21 +110,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     { href: "/dashboard", label: t("nav.dashboard"), icon: LayoutDashboard },
     { href: "/goals", label: t("nav.goals"), icon: Target },
     { href: "/coding", label: t("nav.coding_agent"), icon: Code2 },
+    { href: "/agents", label: t("nav.agents"), icon: Bot },
+    { href: "/skills", label: t("nav.skills"), icon: Sparkles },
+    { href: "/memory", label: t("nav.memory"), icon: Brain },
+    { href: "/artifacts", label: t("nav.artifacts"), icon: Layers },
+    { href: "/messaging", label: t("nav.messaging"), icon: MessageCircle },
     { href: "/reviews", label: t("nav.reviews"), icon: GitMerge },
     { href: "/teams", label: t("nav.teams"), icon: Users },
-    { href: "/mcp", label: t("nav.mcp"), icon: Bot },
-    { href: "/agents", label: t("nav.agents"), icon: Bot },
+    { href: "/mcp", label: t("nav.mcp"), icon: FolderKanban },
     { href: "/tasks/new", label: t("nav.new_task"), icon: PlusCircle },
     { href: "/runs", label: t("nav.runs"), icon: Activity },
     { href: "/approvals", label: t("nav.approvals"), icon: CheckSquare },
+    { href: "/reports", label: t("nav.reports"), icon: FileBarChart },
+    { href: "/settings", label: t("nav.settings"), icon: Settings },
+  ];
+
+  const backlinkNavItems = [
     { href: "/backlinks/sites", label: t("nav.backlink_sites"), icon: Globe },
     { href: "/backlinks/accounts", label: t("nav.backlink_accounts"), icon: Users },
     { href: "/backlinks/links", label: t("nav.backlink_links"), icon: Link2 },
     { href: "/backlinks/settings", label: t("nav.backlink_identity"), icon: KeyRound },
     { href: "/backlinks/import", label: t("nav.backlink_import"), icon: Upload },
     { href: "/mailboxes", label: t("nav.mailboxes"), icon: Mail },
-    { href: "/reports", label: t("nav.reports"), icon: FileBarChart },
-    { href: "/settings", label: t("nav.settings"), icon: Settings },
   ];
 
   const handleKillswitch = async () => {
@@ -187,13 +202,57 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 key={item.href}
                 href={item.href}
                 onClick={() => setSidebarOpen(false)}
-                className={`flex min-h-[44px] items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
+                className={`flex min-h-[40px] items-center gap-3 rounded-xl px-3 py-1.5 text-sm transition-colors ${
                   active
-                    ? "bg-primary text-white font-semibold"
+                    ? "bg-primary text-white font-semibold shadow-sm"
                     : "text-ink hover:bg-canvas"
                 }`}
               >
                 <Icon className="h-4 w-4 shrink-0" />
+                {!collapsed && <span className="truncate">{item.label}</span>}
+              </Link>
+            );
+          })}
+
+          {!collapsed && (
+            <div className="mt-4 space-y-1 border-t border-borderline pt-3">
+              <div className="flex items-center justify-between px-3 text-[11px] font-bold uppercase tracking-wide text-muted">
+                <span>{t("nav.target_sites")}</span>
+                <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
+                  {targetProjects.length}
+                </span>
+              </div>
+              {targetProjects.slice(0, 4).map((p) => (
+                <Link
+                  key={p.id}
+                  href={`/backlinks/sites?project=${encodeURIComponent(p.id)}`}
+                  onClick={() => setSidebarOpen(false)}
+                  className="flex items-center justify-between rounded-lg px-3 py-1 text-xs text-muted hover:bg-canvas hover:text-primary"
+                >
+                  <span className="truncate">{p.name}</span>
+                  <bdi dir="ltr" className="font-mono text-[10px] opacity-75">
+                    {p.domain}
+                  </bdi>
+                </Link>
+              ))}
+            </div>
+          )}
+
+          {backlinkNavItems.map((item) => {
+            const active = pathname === item.href || pathname.startsWith(item.href + "/");
+            const Icon = item.icon;
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                onClick={() => setSidebarOpen(false)}
+                className={`flex min-h-[38px] items-center gap-3 rounded-xl px-3 py-1.5 text-xs transition-colors ${
+                  active
+                    ? "bg-primary text-white font-semibold"
+                    : "text-muted hover:bg-canvas hover:text-ink"
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5 shrink-0" />
                 {!collapsed && <span className="truncate">{item.label}</span>}
               </Link>
             );

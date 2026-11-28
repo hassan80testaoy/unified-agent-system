@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 _LOCK = threading.Lock()
 _EPHEMERAL_SECRETS: set[str] = set()
+_VAULT_SECRETS: set[str] = set()
 
 _PATTERNS = [
     (re.compile(r"sk-ant-[A-Za-z0-9\-_]{10,}"), "[REDACTED_ANTHROPIC_KEY]"),
@@ -39,12 +40,25 @@ def discard_ephemeral_secret(secret: str | None) -> None:
             _EPHEMERAL_SECRETS.discard(secret)
 
 
+def register_vault_secret(secret: str | None) -> None:
+    """Register a Blind-Fill Vault secret so it NEVER appears in LLM prompts, payloads, or logs (§8L.2)."""
+    if secret and len(secret) >= 4:
+        with _LOCK:
+            _VAULT_SECRETS.add(secret)
+
+
+def discard_vault_secret(secret: str | None) -> None:
+    if secret:
+        with _LOCK:
+            _VAULT_SECRETS.discard(secret)
+
+
 def scrub_text(text: str) -> str:
     if not text:
         return text
     cleaned = text
     with _LOCK:
-        for secret in list(_EPHEMERAL_SECRETS):
+        for secret in list(_EPHEMERAL_SECRETS) + list(_VAULT_SECRETS):
             if secret in cleaned:
                 cleaned = cleaned.replace(secret, "[REDACTED]")
     for regex, replacement in _PATTERNS:

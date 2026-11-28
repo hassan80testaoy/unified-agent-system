@@ -319,16 +319,27 @@ def _maybe_llm_plan_enhancement(db: Session, thread: CodingThread, prompt: str) 
     if not prov or not prov.enabled or prov.kind == "llm-mock":
         return None
     try:
+        from app.services.memory_service import build_memory_context_block
+
+        mem_ctx, _ = build_memory_context_block(
+            db,
+            workspace_id=thread.workspace_id,
+            user_id=thread.user_id,
+            query=prompt,
+            current_thread_id=thread.id,
+        )
+        base_sys = thread.system_prompt_snapshot or SYSTEM_PROMPT_TEMPLATE
+        full_sys = f"{base_sys}\n\n{mem_ctx}" if mem_ctx else base_sys
         res = LLMRouter(db, thread.workspace_id).route(
             task_type="coding_planner",
             tier="mid",
             prompt=f"اكتب ملخص خطة تنفيذ هندسية موجزة (4 نقاط بالعربية) للمهمة التالية:\n{prompt}",
-            system_prompt=thread.system_prompt_snapshot or SYSTEM_PROMPT_TEMPLATE,
+            system_prompt=full_sys,
             preferred_provider=pref_provider,
             preferred_model=pref_model,
             allow_mock_fallback=False,
         )
-        out = str(res.get("output") or "").strip()
+        out = str(res.get("raw_text") or res.get("output") or "").strip()
         return out or None
     except Exception:
         return None

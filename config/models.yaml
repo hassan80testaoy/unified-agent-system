@@ -25,6 +25,15 @@ pricing_per_1m_usd:
   gpt-4.1-nano:
     input: 0.10
     output: 0.40
+  grok-3:
+    input: 3.00
+    output: 15.00
+  grok-3-mini:
+    input: 0.30
+    output: 0.50
+  deepseek-chat:
+    input: 0.27
+    output: 1.10
   llama-3.3-70b-versatile:
     input: 0.00
     output: 0.00

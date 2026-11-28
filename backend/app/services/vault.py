@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.models.instinct import VaultItem, VaultRequest
 from app.security.auth import record_audit
 from app.security.crypto import decrypt_secret, encrypt_secret, generate_site_password, mask_email
+from app.security.sanitizer import register_vault_secret
 
 
 def _hash_token(raw_token: str) -> str:
@@ -111,7 +112,20 @@ def submit_vault_request(
     )
     db.commit()
     db.refresh(item)
+    register_vault_secret(secret_value)
     return item
+
+
+def sync_vault_secrets_from_db(db: Session) -> int:
+    """Load Vault secret fingerprints into the sanitizer scrubber at startup so secrets never leak to LLM payloads (§8L.2)."""
+    loaded = 0
+    for item in db.query(VaultItem).all():
+        try:
+            register_vault_secret(decrypt_secret(item.secret_enc))
+            loaded += 1
+        except Exception:
+            continue
+    return loaded
 
 
 def get_domain_pinned_secret(
@@ -130,7 +144,9 @@ def get_domain_pinned_secret(
     if allowed and "*" not in allowed:
         if not any(host == dom or host.endswith("." + dom) for dom in allowed):
             raise PermissionError(f"Vault item '{item.label}' is not pinned for domain '{host}'.")
-    return decrypt_secret(item.secret_enc)
+    secret = decrypt_secret(item.secret_enc)
+    register_vault_secret(secret)
+    return secret
 
 
 def create_server_generated_site_password() -> tuple[str, str]:

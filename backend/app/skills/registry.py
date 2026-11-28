@@ -174,17 +174,43 @@ def _skill_proactive(db: Session, workspace_id: str, user_id: str, params: dict[
     }
 
 
+def _register_all_coded_skills() -> None:
+    from app.skills.coded.catalog import CODED_SKILLS_SPECS, execute_coded_skill
+
+    for spec in CODED_SKILLS_SPECS:
+        slug = spec["slug"]
+
+        def _make_handler(s_name: str):
+            def _fn(db: Session, workspace_id: str, user_id: str, params: dict[str, Any]) -> dict[str, Any]:
+                return execute_coded_skill(s_name, db, workspace_id, user_id, params)
+
+            return _fn
+
+        _SKILL_HANDLERS[slug] = _make_handler(slug)
+
+
+_register_all_coded_skills()
+
+
 def list_all_skills() -> dict[str, Any]:
+    from app.skills.coded.catalog import CODED_SKILLS_SPECS
+
+    coded_map = {s["slug"]: s for s in CODED_SKILLS_SPECS}
     items = []
     for entry in ALL_38_PLATFORM_SKILLS:
+        c = coded_map.get(entry["name"])
         items.append(
             {
                 **entry,
                 "executable": entry["name"] in _SKILL_HANDLERS or entry["phase"] <= 1,
+                "coded": c is not None,
+                "input_schema": c["schema"] if c else {},
+                "requires_approval": bool(c["requires_approval"]) if c else False,
             }
         )
     return {
         "platform_skills_count": len(items),
+        "coded_skills_count": len(coded_map),
         "platform_skills": items,
         "site_playbooks_count": len(SITE_PLAYBOOKS),
         "site_playbooks": SITE_PLAYBOOKS,

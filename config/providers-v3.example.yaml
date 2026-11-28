@@ -86,6 +86,20 @@ providers:
     budget_usd_daily: 3.0
     enabled: true
 
+  - id: xai
+    name: Grok (xAI)
+    kind: llm
+    connect: api_key
+    api_base: https://api.x.ai/v1
+    protocol: openai-completions
+    auth: env:XAI_API_KEY
+    models:
+      strong: grok-3
+      mid: grok-3
+      cheap: grok-3-mini
+    budget_usd_daily: 3.0
+    enabled: false
+
   # --- نقطة نهاية مخصصة (مثال — بدّل الرابط والموديلات) ---
   - id: my-custom-endpoint
     kind: llm
