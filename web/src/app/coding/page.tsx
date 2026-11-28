@@ -20,7 +20,6 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { AppShell } from "@/components/AppShell";
 import { useApp } from "@/i18n/context";
 import { ApiError, apiFetch } from "@/lib/api";
 
@@ -495,7 +494,6 @@ export default function CodingAgentPage() {
   }
 
   return (
-    <AppShell>
       <div className="space-y-4">
         {/* Header */}
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/70 p-4">
@@ -1081,6 +1079,5 @@ export default function CodingAgentPage() {
           </section>
         </div>
       </div>
-    </AppShell>
   );
 }
