@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import time
+from typing import Any, AsyncGenerator
 
 from sqlalchemy.orm import Session
 
@@ -287,6 +289,10 @@ async def process_user_message(
         sys_prompt = mode_row.system_prompt if mode_row else "You are a helpful Arabic-first assistant."
         if thread.compacted_summary:
             sys_prompt += f"\n\n[Previous compacted context]:\n{thread.compacted_summary}"
+        t_start = time.monotonic()
+        model_used = None
+        latency_ms = None
+        is_mock_reply = bool(mock_mode)
         try:
             res = router.route(
                 task_type="chat",
@@ -296,9 +302,24 @@ async def process_user_message(
                 use_cache=False,
             )
             answer = res.get("raw_text") or "تم استلام رسالتك."
+            model_used = res.get("model")
+            latency_ms = res.get("latency_ms")
+            is_mock_reply = bool(is_mock_reply or res.get("is_mock"))
         except Exception:
             answer = "تم استلام رسالتك. يرجى ضبط مزود ذكاء اصطناعي نشط في الإعدادات للحصول على إجابة من النموذج."
-        reply_payload = {"content": answer, "card_type": None, "card_payload": {"mode": thread.mode_key}}
+            latency_ms = int((time.monotonic() - t_start) * 1000)
+        if is_mock_reply and not answer.startswith("محاكاة — "):
+            answer = f"محاكاة — {answer}"
+        reply_payload = {
+            "content": answer,
+            "card_type": None,
+            "card_payload": {
+                "mode": thread.mode_key,
+                "model_used": model_used,
+                "latency_ms": latency_ms,
+                "is_mock": is_mock_reply,
+            },
+        }
 
     asst_seq = user_seq + 1
     asst_msg = ChatMessage(
@@ -418,3 +439,300 @@ def undo_thread(db: Session, thread: ChatThread, to_seq: int | None = None) -> d
     db.commit()
     rewind_log(thread.id, target)
     return {"thread_id": thread.id, "to_seq": target, "rewound_count": rewound_count}
+
+
+_ACTIVE_STREAMS: dict[str, asyncio.Event] = {}
+
+
+def cancel_active_stream(thread_id: str) -> bool:
+    ev = _ACTIVE_STREAMS.get(thread_id)
+    if ev is not None:
+        ev.set()
+        return True
+    return False
+
+
+async def stream_user_message(
+    db: Session,
+    *,
+    thread: ChatThread,
+    user_id: str,
+    content: str,
+    mock_mode: bool = False,
+    simulate_captcha: bool = False,
+    simulate_2fa: bool = False,
+    disconnected_check: Any = None,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Stream chat replies token-by-token (SSE payloads) with cancel, budget/killswitch guard, & model/latency tracking."""
+    clean_text = scrub_text(content).strip()
+    user_seq = _next_seq(db, thread.id)
+
+    route_info = classify_intent(clean_text)
+    intent = route_info["intent"]
+    entities = route_info.get("entities") or {}
+
+    user_msg = ChatMessage(
+        workspace_id=thread.workspace_id,
+        thread_id=thread.id,
+        seq=user_seq,
+        role="user",
+        content=clean_text,
+        intent=intent,
+    )
+    db.add(user_msg)
+    if user_seq == 1 and thread.title == "محادثة جديدة" and clean_text:
+        thread.title = clean_text[:64]
+    db.commit()
+    db.refresh(user_msg)
+    append_turn(
+        thread.id,
+        {"type": "message", "seq": user_seq, "role": "user", "intent": intent, "content": clean_text},
+    )
+
+    yield {
+        "event": "start",
+        "data": {
+            "thread_id": thread.id,
+            "user_seq": user_seq,
+            "intent": intent,
+            "mock_mode": bool(mock_mode),
+        },
+    }
+
+    cancel_ev = asyncio.Event()
+    _ACTIVE_STREAMS[thread.id] = cancel_ev
+    try:
+        # Specialized deterministic workflows execute via existing handlers and emit chunked + final metadata
+        if intent in {"flights", "agent-mail", "link_monitor", "reports", "backlink"}:
+            t0 = time.monotonic()
+            model_used: str | None = None
+            card_type: str | None = None
+            card_payload: dict[str, Any] | None = None
+            if intent == "flights":
+                r = _handle_flights(db, thread.workspace_id, clean_text)
+            elif intent == "agent-mail":
+                r = _handle_mail(db, thread.workspace_id)
+            elif intent == "link_monitor":
+                r = _handle_link_monitor(db, thread.workspace_id)
+            elif intent == "reports":
+                r = _handle_reports(db, thread.workspace_id)
+            else:
+                domain = entities.get("domain")
+                email = entities.get("email")
+                if not email:
+                    active_google = (
+                        db.query(GoogleAccount)
+                        .filter(GoogleAccount.workspace_id == thread.workspace_id, GoogleAccount.status == "active")
+                        .first()
+                    )
+                    if active_google and active_google.email_enc:
+                        email = decrypt_secret(active_google.email_enc)
+                if not domain or not email:
+                    r = {
+                        "content": "🔗 **وكيل الباك لينك جاهز (Flagship Loop):**\nيرجى تحديد اسم الموقع المستهدف والبريد الإلكتروني الحقيقي.",
+                        "card_type": None,
+                        "card_payload": {"need": ["domain", "email"], "mock_mode": bool(mock_mode)},
+                    }
+                else:
+                    ok_email, email_err = validate_real_email(email)
+                    if not ok_email:
+                        r = {
+                            "content": email_err or "يرجى إدخال بريد إلكتروني حقيقي للتسجيل.",
+                            "card_type": None,
+                            "card_payload": {"status": "invalid_email", "mock_mode": bool(mock_mode)},
+                        }
+                    else:
+                        loop_res = await run_flagship_backlink_loop(
+                            db,
+                            workspace_id=thread.workspace_id,
+                            user_id=user_id,
+                            domain=domain,
+                            email=email,
+                            mock_mode=bool(mock_mode),
+                            simulate_captcha=simulate_captcha,
+                            simulate_2fa=simulate_2fa,
+                        )
+                        loop_res.setdefault("mock_mode", bool(mock_mode))
+                        r = {"content": loop_res["report_ar"], "card_type": loop_res.get("card_type"), "card_payload": loop_res}
+
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            full_text = str(r["content"])
+            card_type = r.get("card_type")
+            card_payload = dict(r.get("card_payload") or {})
+            card_payload.setdefault("latency_ms", latency_ms)
+            if model_used:
+                card_payload["model_used"] = model_used
+            yield {"event": "token", "data": {"token": full_text, "model": model_used or "", "is_mock": bool(card_payload.get("is_mock", mock_mode))}}
+
+            asst_seq = user_seq + 1
+            asst_msg = ChatMessage(
+                workspace_id=thread.workspace_id,
+                thread_id=thread.id,
+                seq=asst_seq,
+                role="assistant",
+                content=scrub_text(full_text),
+                intent=intent,
+                card_type=card_type,
+                card_payload=card_payload,
+            )
+            db.add(asst_msg)
+            db.commit()
+            db.refresh(asst_msg)
+            append_turn(thread.id, {"type": "message", "seq": asst_seq, "role": "assistant", "intent": intent, "content": asst_msg.content})
+            yield {
+                "event": "done",
+                "data": {
+                    "message_id": asst_msg.id,
+                    "seq": asst_seq,
+                    "model_used": model_used,
+                    "latency_ms": latency_ms,
+                    "is_mock": bool(card_payload.get("is_mock", mock_mode)),
+                    "card_type": card_type,
+                    "card_payload": card_payload,
+                },
+            }
+            return
+
+        # General / Coding streaming completion
+        mode_row = (
+            db.query(ModePreset)
+            .filter(ModePreset.workspace_id == thread.workspace_id, ModePreset.key == thread.mode_key)
+            .first()
+        )
+        router = LLMRouter(db, thread.workspace_id)
+        if intent == "coding":
+            sys_prompt = "You are a general-purpose software engineer assistant. Provide a concise Arabic plan and next action."
+            task_type = "coding"
+            tier = "mid"
+        else:
+            sys_prompt = mode_row.system_prompt if mode_row else "You are a helpful Arabic-first assistant."
+            if thread.compacted_summary:
+                sys_prompt += f"\n\n[Previous compacted context]:\n{thread.compacted_summary}"
+            task_type = "chat"
+            tier = "cheap"
+
+        parts: list[str] = []
+        model_used = ""
+        req_model = ""
+        latency_ms = 0
+        is_mock_reply = bool(mock_mode)
+        aborted_reason: str | None = None
+        prefixed = False
+        prefix_text = "💡 **وكيل البرمجة العام (`/coding`):**\n" if intent == "coding" else ""
+
+        if prefix_text:
+            parts.append(prefix_text)
+            yield {"event": "token", "data": {"token": prefix_text, "model": "", "is_mock": is_mock_reply}}
+
+        async for chunk in router.route_stream(
+            task_type=task_type,
+            tier=tier,
+            prompt=clean_text,
+            system_prompt=sys_prompt,
+            allow_mock_fallback=True,
+            cancel_event=cancel_ev,
+        ):
+            if disconnected_check and await disconnected_check():
+                cancel_ev.set()
+
+            ctype = chunk.get("type")
+            if ctype == "token":
+                tok = str(chunk.get("token") or "")
+                model_used = str(chunk.get("model") or model_used)
+                is_mock_reply = bool(is_mock_reply or chunk.get("is_mock"))
+                if is_mock_reply and not prefixed:
+                    prefixed = True
+                    if not tok.startswith("محاكاة — ") and not (parts and parts[0].startswith("محاكاة — ")):
+                        tok = f"محاكاة — {tok}"
+                parts.append(tok)
+                yield {"event": "token", "data": {"token": tok, "model": model_used, "is_mock": is_mock_reply}}
+            elif ctype == "aborted":
+                aborted_reason = str(chunk.get("reason") or "aborted")
+                model_used = str(chunk.get("model") or model_used)
+                latency_ms = int(chunk.get("latency_ms") or 0)
+                is_mock_reply = bool(is_mock_reply or chunk.get("is_mock"))
+                break
+            elif ctype == "done":
+                model_used = str(chunk.get("model") or model_used)
+                req_model = str(chunk.get("requested_model") or "")
+                latency_ms = int(chunk.get("latency_ms") or 0)
+                is_mock_reply = bool(is_mock_reply or chunk.get("is_mock"))
+                break
+
+        full_content = "".join(parts).strip() or ("تم إيقاف البث." if aborted_reason else "تم استلام رسالتك.")
+        if is_mock_reply and not full_content.startswith("محاكاة — "):
+            full_content = f"محاكاة — {full_content}"
+
+        asst_seq = user_seq + 1
+        card_payload = {
+            "mode": thread.mode_key,
+            "model_used": model_used or None,
+            "requested_model": req_model or None,
+            "latency_ms": latency_ms,
+            "is_mock": is_mock_reply,
+            "aborted": bool(aborted_reason),
+            "abort_reason": aborted_reason,
+        }
+        if intent == "coding":
+            card_payload["coding_route"] = "/coding"
+
+        asst_msg = ChatMessage(
+            workspace_id=thread.workspace_id,
+            thread_id=thread.id,
+            seq=asst_seq,
+            role="assistant",
+            content=scrub_text(full_content),
+            intent=intent,
+            card_type=None,
+            card_payload=card_payload,
+        )
+        db.add(asst_msg)
+        db.commit()
+        db.refresh(asst_msg)
+        append_turn(
+            thread.id,
+            {
+                "type": "message",
+                "seq": asst_seq,
+                "role": "assistant",
+                "intent": intent,
+                "model_used": model_used,
+                "latency_ms": latency_ms,
+                "content": asst_msg.content,
+            },
+        )
+        await ws_hub.broadcast(
+            f"thread:{thread.id}",
+            {
+                "type": "message",
+                "thread_id": thread.id,
+                "message": {
+                    "id": asst_msg.id,
+                    "seq": asst_msg.seq,
+                    "role": asst_msg.role,
+                    "content": asst_msg.content,
+                    "intent": asst_msg.intent,
+                    "model_used": model_used,
+                    "latency_ms": latency_ms,
+                    "card_payload": card_payload,
+                },
+            },
+        )
+
+        ev_name = "aborted" if aborted_reason else "done"
+        yield {
+            "event": ev_name,
+            "data": {
+                "message_id": asst_msg.id,
+                "seq": asst_seq,
+                "reason": aborted_reason,
+                "model_used": model_used or None,
+                "requested_model": req_model or None,
+                "latency_ms": latency_ms,
+                "is_mock": is_mock_reply,
+                "content": asst_msg.content,
+                "card_payload": card_payload,
+            },
+        }
+    finally:
+        _ACTIVE_STREAMS.pop(thread.id, None)

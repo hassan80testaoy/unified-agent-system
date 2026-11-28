@@ -54,11 +54,11 @@ def test_freellmapi_auto_fetch_on_key_enable_pagination_and_refresh(owner_sessio
     body = key_res.json()
     assert body["catalogue"]["fetched_count"] == 120
     assert body["catalogue"]["total_count"] == 120
-    assert any(c["url"] == "http://localhost:3001/v1/models" and "Bearer flm_test_key_9999" in c["headers"].get("Authorization", "") for c in seen_calls)
+    assert any(c["url"] == "http://127.0.0.1:31415/v1/models" and "Bearer flm_test_key_9999" in c["headers"].get("Authorization", "") for c in seen_calls)
 
-    # Tier defaults stay `auto`
+    # Tier defaults stay `auto:fast` / `auto`
     provs = {p["id"]: p for p in client.get("/api/providers", headers=headers).json()["providers"]}
-    assert provs["freellmapi"]["models"]["cheap"] == "auto"
+    assert provs["freellmapi"]["models"]["cheap"] == "auto:fast"
     assert provs["freellmapi"]["models"]["mid"] == "auto"
     assert provs["freellmapi"]["models"]["strong"] == "auto"
     assert provs["freellmapi"]["catalogue"]["last_fetched_at"]
@@ -265,7 +265,7 @@ def test_tier_and_role_model_routing_sends_exact_model_on_wire(owner_session, te
     assert res_planner["provider_id"] == "freellmapi"
     assert res_planner["model"] == "groq/llama-3.3-70b-versatile"
     assert res_planner["output"] == "real-wire-reply"
-    assert wire_calls[-1]["url"] == "http://localhost:3001/v1/chat/completions"
+    assert wire_calls[-1]["url"] == "http://127.0.0.1:31415/v1/chat/completions"
     assert wire_calls[-1]["json"]["model"] == "groq/llama-3.3-70b-versatile"
 
     # 2. worker/chat role -> stays `auto` default

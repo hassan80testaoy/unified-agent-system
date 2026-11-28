@@ -103,11 +103,11 @@ providers:
   - id: freellmapi
     kind: llm
     connect: custom_endpoint
-    api_base: http://localhost:3001/v1
+    api_base: http://127.0.0.1:31415/v1
     protocol: openai-completions
     auth: env:FREELLMAPI_API_KEY
     models:
-      cheap: auto
+      cheap: auto:fast
       mid: auto
       strong: auto
     budget_usd_daily: 0.0

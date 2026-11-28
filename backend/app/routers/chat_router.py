@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.v3_harness import ChatMessage, ChatThread
 from app.security.auth import AuthContext, get_current_auth, record_audit, require_roles
-from app.services.chat_agent import compact_thread, create_thread, process_user_message, undo_thread
+from app.services.chat_agent import (
+    cancel_active_stream,
+    compact_thread,
+    create_thread,
+    process_user_message,
+    stream_user_message,
+    undo_thread,
+)
 from app.services.events import ws_hub
 from app.services.runtime_checks import get_runtime_readiness
 from app.services.session_log import read_log
@@ -59,6 +68,7 @@ def _serialize_thread(t: ChatThread) -> dict[str, Any]:
 
 
 def _serialize_message(m: ChatMessage) -> dict[str, Any]:
+    cp = m.card_payload or {}
     return {
         "id": m.id,
         "seq": m.seq,
@@ -67,6 +77,8 @@ def _serialize_message(m: ChatMessage) -> dict[str, Any]:
         "intent": m.intent,
         "card_type": m.card_type,
         "card_payload": m.card_payload,
+        "model_used": cp.get("model_used"),
+        "latency_ms": cp.get("latency_ms"),
         "run_id": m.run_id,
         "created_at": m.created_at.isoformat(),
     }
@@ -170,6 +182,57 @@ async def send_chat_message(
         simulate_captcha=req.simulate_captcha,
         simulate_2fa=req.simulate_2fa,
     )
+
+
+@router.post("/api/chat/threads/{thread_id}/messages/stream")
+async def stream_chat_message(
+    thread_id: str,
+    req: ChatMessageCreateRequest,
+    request: Request,
+    auth: AuthContext = Depends(require_roles("owner", "admin", "member")),
+    db: Session = Depends(get_db),
+):
+    t = db.get(ChatThread, thread_id)
+    if not t or t.workspace_id != auth.workspace.id:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "المحادثة غير موجودة", "message_en": "Thread not found"})
+    resolved_mock = (
+        bool(get_runtime_readiness(db, auth.workspace.id)["default_mock_mode"])
+        if req.mock_mode is None
+        else bool(req.mock_mode)
+    )
+
+    async def _sse():
+        async for ev in stream_user_message(
+            db,
+            thread=t,
+            user_id=auth.user.id,
+            content=req.content,
+            mock_mode=resolved_mock,
+            simulate_captcha=req.simulate_captcha,
+            simulate_2fa=req.simulate_2fa,
+            disconnected_check=request.is_disconnected,
+        ):
+            payload = json.dumps(ev["data"], ensure_ascii=False)
+            yield f"event: {ev['event']}\ndata: {payload}\n\n"
+
+    return StreamingResponse(
+        _sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/api/chat/threads/{thread_id}/cancel")
+def cancel_chat_stream(
+    thread_id: str,
+    auth: AuthContext = Depends(require_roles("owner", "admin", "member")),
+    db: Session = Depends(get_db),
+):
+    t = db.get(ChatThread, thread_id)
+    if not t or t.workspace_id != auth.workspace.id:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message_ar": "المحادثة غير موجودة", "message_en": "Thread not found"})
+    cancelled = cancel_active_stream(t.id)
+    return {"thread_id": t.id, "cancelled": cancelled}
 
 
 @router.post("/api/chat/threads/{thread_id}/compact")

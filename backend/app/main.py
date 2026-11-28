@@ -20,12 +20,17 @@ from app.routers import (
     chat_router,
     coding_router,
     mail_google_router,
+    mcp_router,
     modes_router,
     tasks_runs_router,
+    teams_triggers_router,
 )
 from app.security.sanitizer import install_log_sanitizer
+from app.models.core import Workspace
 from app.services.coding_agent import resume_interrupted_threads
+from app.services.llm_router import seed_default_providers
 from app.services.model_catalogue import catalogue_daily_refresh_loop
+from app.services.triggers_service import trigger_scheduler_loop
 
 
 @asynccontextmanager
@@ -35,6 +40,8 @@ async def lifespan(_app: FastAPI):
     Base.metadata.create_all(bind=engine)
     db = db_mod.SessionLocal()
     try:
+        for ws in db.query(Workspace).all():
+            seed_default_providers(db, ws.id)
         resume_interrupted_threads(db)
         db.commit()
     except Exception:
@@ -44,18 +51,21 @@ async def lifespan(_app: FastAPI):
 
     stop_event = asyncio.Event()
     refresh_task: asyncio.Task[None] | None = None
+    trigger_task: asyncio.Task[None] | None = None
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         refresh_task = asyncio.create_task(catalogue_daily_refresh_loop(stop_event))
+        trigger_task = asyncio.create_task(trigger_scheduler_loop(stop_event))
     try:
         yield
     finally:
         stop_event.set()
-        if refresh_task is not None:
-            refresh_task.cancel()
-            try:
-                await refresh_task
-            except asyncio.CancelledError:
-                pass
+        for bg_task in (refresh_task, trigger_task):
+            if bg_task is not None:
+                bg_task.cancel()
+                try:
+                    await bg_task
+                except asyncio.CancelledError:
+                    pass
 
 
 app = FastAPI(
@@ -86,3 +96,5 @@ app.include_router(captcha_vault_reports_router.router)
 app.include_router(modes_router.router)
 app.include_router(chat_router.router)
 app.include_router(coding_router.router)
+app.include_router(mcp_router.router)
+app.include_router(teams_triggers_router.router)

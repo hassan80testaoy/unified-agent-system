@@ -68,6 +68,16 @@ from app.models.coding import (
     ModelRace,
     ThreadFileSnapshot,
 )
+from app.models.phase5 import (
+    AutomationTrigger,
+    BotContact,
+    InstalledSkill,
+    McpServer,
+    McpSessionPermission,
+    TeamChannel,
+    TeamPackageImport,
+    TriggerRunLog,
+)
 from app.models.seo import (
     ContactLog,
     ContentDraft,
@@ -140,4 +150,12 @@ __all__ = [
     "ThreadFileSnapshot",
     "ModelRace",
     "HookRule",
+    "McpServer",
+    "McpSessionPermission",
+    "InstalledSkill",
+    "BotContact",
+    "TeamChannel",
+    "TeamPackageImport",
+    "AutomationTrigger",
+    "TriggerRunLog",
 ]

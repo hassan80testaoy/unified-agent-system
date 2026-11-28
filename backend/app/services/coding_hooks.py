@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models.coding import HookRule
+from app.services.mcp_service import build_sanitized_worker_env
 
 
 def run_hooks(
@@ -33,7 +34,7 @@ def run_hooks(
         pattern = (rule.tool_pattern or "*").strip()
         if not fnmatch.fnmatch(tool_name, pattern):
             continue
-        env = os.environ.copy()
+        env = build_sanitized_worker_env()
         env["UAS_HOOK_EVENT"] = event
         env["UAS_HOOK_TOOL"] = tool_name
         env["UAS_WORKSPACE_DIR"] = str(workspace_dir)

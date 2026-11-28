@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
+from urllib.parse import urlparse
 
 from app.config import get_env_secret_by_ref, get_settings
 from app.db import SessionLocal, utcnow
@@ -42,8 +43,28 @@ ROLE_KEYS: tuple[str, ...] = (
 
 CATALOGUE_STALE_HOURS = 24
 
-FREELLMAPI_EMPTY_AR = "لا توجد مفاتيح في FreeLLMAPI — أضف مفاتيح من http://localhost:3001/Keys"
-FREELLMAPI_EMPTY_EN = "No API keys configured in FreeLLMAPI — add keys at http://localhost:3001/Keys"
+DEFAULT_FREELLMAPI_API_BASE = "http://127.0.0.1:31415/v1"
+FREELLMAPI_EMPTY_AR = "لا توجد مفاتيح في FreeLLMAPI — أضف مفاتيح من http://127.0.0.1:31415/Keys"
+FREELLMAPI_EMPTY_EN = "No API keys configured in FreeLLMAPI — add keys at http://127.0.0.1:31415/Keys"
+
+
+def freellmapi_keys_url(api_base: str | None) -> str:
+    raw = (api_base or "").strip() or DEFAULT_FREELLMAPI_API_BASE
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}/Keys"
+    base = raw.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    return f"{base}/Keys"
+
+
+def build_freellmapi_empty_messages(api_base: str | None) -> tuple[str, str]:
+    keys_url = freellmapi_keys_url(api_base)
+    return (
+        f"لا توجد مفاتيح في FreeLLMAPI — أضف مفاتيح من {keys_url}",
+        f"No API keys configured in FreeLLMAPI — add keys at {keys_url}",
+    )
 
 FCC_FALLBACK_AR = (
     "نقطة /v1/models غير متاحة في free-claude-code — تُستخدم الموديلات الثلاثة الافتراضية أو Slugs المضافة يدوياً (<provider-id>/<model-id>)."
@@ -130,8 +151,7 @@ def get_catalogue_summary(db: Session, workspace_id: str, provider: Provider) ->
     empty_ar: str | None = None
     empty_en: str | None = None
     if provider.id == "freellmapi" and total_count == 0:
-        empty_ar = FREELLMAPI_EMPTY_AR
-        empty_en = FREELLMAPI_EMPTY_EN
+        empty_ar, empty_en = build_freellmapi_empty_messages(provider.api_base)
 
     fallback_ar: str | None = None
     fallback_en: str | None = None
@@ -317,8 +337,10 @@ async def fetch_endpoint_models(
     else:
         summary = None
 
-    empty_ar = FREELLMAPI_EMPTY_AR if (provider_id == "freellmapi" and len(parsed) == 0 and (not summary or summary["total_count"] == 0)) else None
-    empty_en = FREELLMAPI_EMPTY_EN if empty_ar else None
+    empty_ar: str | None = None
+    empty_en: str | None = None
+    if provider_id == "freellmapi" and len(parsed) == 0 and (not summary or summary["total_count"] == 0):
+        empty_ar, empty_en = build_freellmapi_empty_messages(prov.api_base if prov else api_base)
 
     return {
         "ok": True,

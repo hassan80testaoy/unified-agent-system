@@ -328,7 +328,7 @@ async def patch_provider(
     if req.name is not None:
         row.name = req.name
     if req.api_base is not None:
-        row.api_base = req.api_base
+        row.api_base = req.api_base.strip()
     if req.models is not None:
         row.models_json = req.models
     if req.budget_usd_daily is not None:
@@ -371,6 +371,7 @@ async def patch_provider(
     return {
         "id": row.id,
         "enabled": row.enabled,
+        "api_base": row.api_base,
         "budget_usd_daily": row.budget_usd_daily,
         "catalogue": get_catalogue_summary(db, auth.workspace.id, row),
     }

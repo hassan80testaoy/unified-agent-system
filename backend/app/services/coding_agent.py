@@ -33,6 +33,7 @@ from app.models.coding import CodingThread, HookRule, ModelRace
 from app.models.providers import Provider, RoleModelAssignment
 from app.services.coding_browser_verify import verify_app_in_real_browser
 from app.services.coding_hooks import run_hooks
+from app.services.mcp_service import build_sanitized_worker_env
 from app.services.coding_worktree import (
     commit_workspace,
     compute_workspace_diffs,
@@ -1037,7 +1038,7 @@ def get_thread_changes(thread: CodingThread) -> dict[str, Any]:
 
 
 def _subprocess_env() -> dict[str, str]:
-    env = os.environ.copy()
+    env = build_sanitized_worker_env()
     venv_bin = str(Path(sys.executable).parent)
     env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
     return env

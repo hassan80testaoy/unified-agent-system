@@ -5,6 +5,8 @@
     "chat": "Chat",
     "dashboard": "Dashboard",
     "coding_agent": "Coding Agent",
+    "teams": "Bots & Teams",
+    "mcp": "MCP & Skills",
     "agents": "Agents",
     "new_task": "New Task",
     "runs": "Runs",
@@ -200,5 +202,15 @@
     "title": "Per-Role Model Assignments",
     "subtitle": "Orchestrator and worker may share a provider; reviewer must differ. Defaults to auto.",
     "save_all": "Save Role Assignments"
+  },
+  "phase5": {
+    "stop_stream": "Stop",
+    "streaming": "Streaming...",
+    "save_url": "Save URL",
+    "base_url_label": "API Base URL",
+    "routing_title": "AI -> Fast Routing (Jev)",
+    "triggers_title": "Schedule & Event Triggers",
+    "mcp_title": "MCP Servers, Session Permissions & Skills",
+    "teams_title": "Bot Roster, Channels & Portable Teams"
   }
 }

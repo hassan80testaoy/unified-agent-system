@@ -11,6 +11,7 @@ import {
   Send,
   ShieldAlert,
   Sparkles,
+  Square,
 } from "lucide-react";
 import { useApp } from "@/i18n/context";
 import { apiFetch } from "@/lib/api";
@@ -33,6 +34,8 @@ interface ChatMsg {
   intent?: string | null;
   card_type?: string | null;
   card_payload?: Record<string, unknown> | null;
+  model_used?: string | null;
+  latency_ms?: number | null;
   created_at: string;
 }
 
@@ -52,10 +55,13 @@ export default function ChatHomePage() {
   const [modes, setModes] = useState<ModeItem[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [streamContent, setStreamContent] = useState("");
+  const [streamModel, setStreamModel] = useState("");
   const [notice, setNotice] = useState("");
   const [mockMode, setMockMode] = useState(false);
   const [runtimeReady, setRuntimeReady] = useState<{ default_mock_mode: boolean; missing_for_real_backlink?: string[] } | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const loadThreads = async () => {
     const res = await apiFetch<{ threads: ChatThread[] }>("/api/chat/threads").catch(() => ({ threads: [] }));
@@ -136,11 +142,23 @@ export default function ChatHomePage() {
     await loadThreadDetail(res.thread.id);
   };
 
+  const stopStreaming = async () => {
+    abortRef.current?.abort();
+    if (activeId) {
+      await apiFetch(`/api/chat/threads/${activeId}/cancel`, { method: "POST" }).catch(() => null);
+    }
+    setSending(false);
+  };
+
   const sendMessage = async (textOverride?: string) => {
     const text = (textOverride ?? input).trim();
     if (!text || sending) return;
     setSending(true);
+    setStreamContent("");
+    setStreamModel("");
     setNotice("");
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       let tid = activeId;
       if (!tid) {
@@ -153,13 +171,76 @@ export default function ChatHomePage() {
         setActiveId(tid);
       }
       if (!textOverride) setInput("");
-      await apiFetch(`/api/chat/threads/${tid}/messages`, {
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `temp-${Date.now()}`,
+          seq: (prev[prev.length - 1]?.seq || 0) + 1,
+          role: "user",
+          content: text,
+          created_at: new Date().toISOString(),
+        },
+      ]);
+
+      const tok = typeof window !== "undefined" ? localStorage.getItem("uas_token") : null;
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (tok) headers["Authorization"] = `Bearer ${tok}`;
+
+      const resp = await fetch(`/api/chat/threads/${tid}/messages/stream`, {
         method: "POST",
+        headers,
+        credentials: "include",
+        signal: controller.signal,
         body: JSON.stringify({ content: text, mock_mode: mockMode }),
       });
+
+      if (!resp.ok || !resp.body) {
+        await apiFetch(`/api/chat/threads/${tid}/messages`, {
+          method: "POST",
+          body: JSON.stringify({ content: text, mock_mode: mockMode }),
+        });
+      } else {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() || "";
+          for (const frame of frames) {
+            let evName = "message";
+            let dataLine = "";
+            for (const ln of frame.split("\n")) {
+              if (ln.startsWith("event:")) evName = ln.slice(6).trim();
+              else if (ln.startsWith("data:")) dataLine += ln.slice(5).trim();
+            }
+            if (!dataLine) continue;
+            try {
+              const parsed = JSON.parse(dataLine);
+              if (evName === "token" && parsed.token) {
+                setStreamContent((prev) => prev + String(parsed.token));
+                if (parsed.model) setStreamModel(String(parsed.model));
+              } else if (evName === "done" || evName === "aborted") {
+                if (parsed.model_used) setStreamModel(String(parsed.model_used));
+              }
+            } catch {
+              // ignore malformed SSE chunk
+            }
+          }
+        }
+      }
+
       await loadThreads();
       await loadThreadDetail(tid);
+    } catch {
+      if (activeId) await loadThreadDetail(activeId);
     } finally {
+      abortRef.current = null;
+      setStreamContent("");
+      setStreamModel("");
       setSending(false);
     }
   };
@@ -399,6 +480,20 @@ export default function ChatHomePage() {
                 </div>
                 <div className="whitespace-pre-wrap leading-relaxed">{m.content}</div>
 
+                {m.role === "assistant" && (() => {
+                  const mod = m.model_used || (m.card_payload?.model_used as string | undefined);
+                  const msRaw = m.latency_ms ?? (m.card_payload?.latency_ms as number | undefined);
+                  if (!mod && msRaw === undefined) return null;
+                  const latFmt = msRaw !== undefined ? (msRaw >= 1000 ? `${(msRaw / 1000).toFixed(1)}s` : `${msRaw}ms`) : "";
+                  return (
+                    <div className="mt-1 flex items-center gap-2 font-mono text-[10px] text-muted">
+                      {mod && <bdi dir="ltr">{mod}</bdi>}
+                      {mod && latFmt && <span>·</span>}
+                      {latFmt && <bdi dir="ltr">{latFmt}</bdi>}
+                    </div>
+                  );
+                })()}
+
                 {m.card_type && (
                   <div className="mt-1 rounded-lg border border-warning/40 bg-amber-500/5 p-2.5 text-[11px]">
                     <div className="mb-1 flex items-center gap-1.5 font-bold text-warning">
@@ -420,6 +515,15 @@ export default function ChatHomePage() {
               </div>
             ))
           )}
+          {sending && (
+            <div className="me-auto flex max-w-[90%] flex-col gap-1.5 rounded-xl border border-primary/40 bg-canvas p-3 text-xs">
+              <div className="flex items-center justify-between gap-2 text-[10px] text-primary">
+                <span className="font-bold uppercase">Agent · {t("phase5.streaming")}</span>
+                {streamModel && <bdi dir="ltr" className="font-mono text-muted">{streamModel}</bdi>}
+              </div>
+              <div className="whitespace-pre-wrap leading-relaxed">{streamContent || "..."}</div>
+            </div>
+          )}
           <div ref={endRef} />
         </div>
 
@@ -438,6 +542,16 @@ export default function ChatHomePage() {
             placeholder={t("chat.placeholder")}
             className="flex-1 rounded-xl border border-borderline bg-canvas px-3 py-2.5 text-xs outline-none focus:border-primary"
           />
+          {sending && (
+            <button
+              type="button"
+              onClick={stopStreaming}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-danger px-4 py-2 text-xs font-semibold text-white"
+            >
+              <Square className="h-3.5 w-3.5" />
+              <span>{t("phase5.stop_stream")}</span>
+            </button>
+          )}
           <button
             type="submit"
             disabled={sending || !input.trim()}

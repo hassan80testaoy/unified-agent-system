@@ -111,6 +111,7 @@ export default function SettingsPage() {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [tunnelCmd, setTunnelCmd] = useState("");
   const [keyEdits, setKeyEdits] = useState<Record<string, string>>({});
+  const [baseEdits, setBaseEdits] = useState<Record<string, string>>({});
   const [acctLabels, setAcctLabels] = useState<Record<string, string>>({});
   const [acctKeys, setAcctKeys] = useState<Record<string, string>>({});
   const [statusMsg, setStatusMsg] = useState("");
@@ -151,31 +152,117 @@ export default function SettingsPage() {
   const [manualSlugsDraft, setManualSlugsDraft] = useState<Record<string, string>>({});
   const [roleModels, setRoleModels] = useState<Record<string, RoleModelConfig>>({});
 
+  // Phase 5 Routing (Jev) & Triggers
+  const [jevCfg, setJevCfg] = useState<{
+    enabled: boolean;
+    decision_provider_id: string | null;
+    decision_model: string;
+    confidence_threshold: number;
+    fallback_to_lead: boolean;
+  }>({ enabled: true, decision_provider_id: null, decision_model: "auto:fast", confidence_threshold: 0.65, fallback_to_lead: true });
+  const [triggers, setTriggers] = useState<
+    { id: string; name: string; trigger_type: string; cron_expr: string | null; event_name: string | null; action_prompt: string; enabled: boolean; paused: boolean; last_fired_at: string | null; fire_count: number }[]
+  >([]);
+  const [triggerHistory, setTriggerHistory] = useState<
+    { id: string; trigger_id: string; fired_at: string; reason: string; action_summary: string; status: string; output_preview: string }[]
+  >([]);
+  const [newTrigName, setNewTrigName] = useState("");
+  const [newTrigType, setNewTrigType] = useState<"schedule" | "event">("schedule");
+  const [newTrigCron, setNewTrigCron] = useState("0 9 * * *");
+  const [newTrigEvent, setNewTrigEvent] = useState("");
+  const [newTrigPrompt, setNewTrigPrompt] = useState("");
+
   const load = () => {
     apiFetch<{ providers: ProviderItem[] }>("/api/providers")
       .then((r) => {
         setProviders(r.providers);
         const tDraft: Record<string, { cheap: string; mid: string; strong: string }> = {};
         const sDraft: Record<string, string> = {};
+        const bDraft: Record<string, string> = {};
         for (const p of r.providers) {
           tDraft[p.id] = {
-            cheap: p.models?.cheap || (p.id === "freellmapi" ? "auto" : ""),
+            cheap: p.models?.cheap || (p.id === "freellmapi" ? "auto:fast" : ""),
             mid: p.models?.mid || (p.id === "freellmapi" ? "auto" : ""),
             strong: p.models?.strong || (p.id === "freellmapi" ? "auto" : ""),
           };
           sDraft[p.id] = (p.catalogue?.manual_slugs || []).join("\n");
+          bDraft[p.id] = p.api_base || "";
         }
         setTierDraft(tDraft);
+        setBaseEdits(bDraft);
         setManualSlugsDraft((prev) => ({ ...sDraft, ...prev }));
       })
       .catch(() => null);
     apiFetch<{ roles: Record<string, RoleModelConfig> }>("/api/settings/role-models")
       .then((r) => setRoleModels(r.roles || {}))
       .catch(() => null);
+    apiFetch<{ routing: typeof jevCfg }>("/api/settings/routing")
+      .then((r) => {
+        if (r.routing) setJevCfg(r.routing);
+      })
+      .catch(() => null);
+    apiFetch<{ triggers: typeof triggers; history: typeof triggerHistory }>("/api/triggers")
+      .then((r) => {
+        setTriggers(r.triggers || []);
+        setTriggerHistory(r.history || []);
+      })
+      .catch(() => null);
     apiFetch<{ modes: ModeItem[] }>("/api/modes").then((r) => setModes(r.modes)).catch(() => null);
     apiFetch<{ google_accounts: GoogleAccountItem[] }>("/api/google-accounts").then((r) => setGoogleAccounts(r.google_accounts)).catch(() => null);
     apiFetch<{ memory: MemoryItem[] }>("/api/memory").then((r) => setMemories(r.memory)).catch(() => null);
     apiFetch<{ tunnel: { ssh_command: string } }>("/api/settings").then((r) => setTunnelCmd(r.tunnel?.ssh_command || "")).catch(() => null);
+  };
+
+  const saveProviderBaseUrl = async (providerId: string) => {
+    const val = (baseEdits[providerId] ?? "").trim();
+    if (!val) return;
+    await apiFetch(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ api_base: val }),
+    });
+    setStatusMsg(locale === "ar" ? `تم تحديث رابط ${providerId} مع الحفاظ على المفتاح المحفوظ.` : `Updated Base URL for ${providerId} without clearing saved key.`);
+    load();
+  };
+
+  const saveJevRouting = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const res = await apiFetch<{ routing: typeof jevCfg }>("/api/settings/routing", {
+      method: "PUT",
+      body: JSON.stringify(jevCfg),
+    });
+    setJevCfg(res.routing);
+    setStatusMsg(locale === "ar" ? "تم حفظ إعدادات التوجيه السريع (Jev)." : "Saved Jev routing settings.");
+  };
+
+  const createTriggerItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTrigName.trim()) return;
+    await apiFetch("/api/triggers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: newTrigName.trim(),
+        trigger_type: newTrigType,
+        cron_expr: newTrigType === "schedule" ? newTrigCron.trim() : null,
+        event_name: newTrigType === "event" ? newTrigEvent.trim() : null,
+        action_prompt: newTrigPrompt.trim() || newTrigName.trim(),
+        enabled: true,
+        paused: false,
+      }),
+    });
+    setNewTrigName("");
+    setNewTrigPrompt("");
+    load();
+  };
+
+  const fireTriggerNow = async (tid: string) => {
+    await apiFetch(`/api/triggers/${tid}/fire`, { method: "POST" });
+    setStatusMsg(locale === "ar" ? "تم تشغيل المحفّز وتسجيل التنفيذ." : "Trigger fired and recorded in history.");
+    load();
+  };
+
+  const deleteTriggerItem = async (tid: string) => {
+    await apiFetch(`/api/triggers/${tid}`, { method: "DELETE" });
+    load();
   };
 
   const loadCataloguePage = (pid: string, q = catSearch, family = catFamily, page = catPage) => {
@@ -657,6 +744,26 @@ export default function SettingsPage() {
                     {p.connect_type || "api_key"} · {p.protocol || "openai-completions"} · daily cap: ${p.budget_usd_daily} ·{" "}
                     {p.has_key ? `key ****${p.key_last4}` : "no saved key"}
                   </div>
+                  {p.kind === "llm" && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] text-muted">{t("phase5.base_url_label")}:</span>
+                      <input
+                        type="text"
+                        dir="ltr"
+                        value={baseEdits[p.id] ?? p.api_base ?? ""}
+                        onChange={(e) => setBaseEdits((prev) => ({ ...prev, [p.id]: e.target.value }))}
+                        placeholder="http://127.0.0.1:31415/v1"
+                        className="w-64 rounded border border-borderline bg-surface px-2 py-1 text-end font-mono text-[11px]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => saveProviderBaseUrl(p.id)}
+                        className="rounded border border-borderline bg-surface px-2 py-1 text-[11px] hover:border-primary"
+                      >
+                        {t("phase5.save_url")}
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   {p.kind === "llm" && (
@@ -770,18 +877,25 @@ export default function SettingsPage() {
                   {/* Expanded Model Catalogue Drawer */}
                   {openCatalogueId === p.id && (
                     <div className="mt-2 space-y-3 rounded-lg border border-borderline bg-surface p-3">
-                      {p.id === "freellmapi" && (catData?.summary?.empty_state_ar || ((p.catalogue?.total_count ?? 0) === 0)) && (
-                        <div className="rounded-lg border border-warning/40 bg-amber-500/10 p-2.5 text-xs text-warning">
-                          <div>
-                            {locale === "ar"
-                              ? "لا توجد مفاتيح في FreeLLMAPI — أضف مفاتيح من "
-                              : "No API keys configured in FreeLLMAPI — add keys at "}
-                            <a href="http://localhost:3001/Keys" target="_blank" rel="noreferrer" className="underline font-mono">
-                              http://localhost:3001/Keys
-                            </a>
+                      {p.id === "freellmapi" && (catData?.summary?.empty_state_ar || ((p.catalogue?.total_count ?? 0) === 0)) && (() => {
+                        const rawBase = (p.api_base || "http://127.0.0.1:31415/v1").trim().replace(/\/+$/, "");
+                        const keysHref = rawBase.endsWith("/v1") ? `${rawBase.slice(0, -3)}/Keys` : `${rawBase}/Keys`;
+                        return (
+                          <div className="rounded-lg border border-warning/40 bg-amber-500/10 p-2.5 text-xs text-warning">
+                            <div>
+                              {catData?.summary?.empty_state_ar && locale === "ar"
+                                ? catData.summary.empty_state_ar
+                                : catData?.summary?.empty_state_en && locale !== "ar"
+                                ? catData.summary.empty_state_en
+                                : `${locale === "ar" ? "لا توجد مفاتيح في FreeLLMAPI — أضف مفاتيح من " : "No API keys configured in FreeLLMAPI — add keys at "}`}
+                              {" "}
+                              <a href={keysHref} target="_blank" rel="noreferrer" className="underline font-mono">
+                                {keysHref}
+                              </a>
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        );
+                      })()}
 
                       {p.id === "free-claude-code" && catData?.summary?.fallback_note_ar && (
                         <div className="rounded-lg border border-info/30 bg-info/10 p-2 text-[11px] text-info">
@@ -1022,6 +1136,125 @@ export default function SettingsPage() {
           </button>
         </form>
       </section>
+
+      {/* 2a-ter. Settings -> AI -> Routing (Jev) & Automation Triggers (§5C) */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <section className="rounded-xl border border-borderline bg-surface p-4 space-y-3 text-xs">
+          <h2 className="text-sm font-bold">{t("phase5.routing_title")}</h2>
+          <form onSubmit={saveJevRouting} className="space-y-2.5">
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={jevCfg.enabled} onChange={(e) => setJevCfg((prev) => ({ ...prev, enabled: e.target.checked }))} />
+              <span>{locale === "ar" ? "تفعيل توجيه Jev السريع للرسائل بدون @منشن" : "Enable Jev fast decision routing"}</span>
+            </label>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <select
+                value={jevCfg.decision_provider_id || ""}
+                onChange={(e) => setJevCfg((prev) => ({ ...prev, decision_provider_id: e.target.value || null }))}
+                className="rounded border border-borderline bg-canvas px-2 py-1.5"
+              >
+                <option value="">auto / heuristic + default</option>
+                {providers.filter((pr) => pr.kind !== "captcha").map((pr) => (
+                  <option key={pr.id} value={pr.id}>{pr.id}</option>
+                ))}
+              </select>
+              <input
+                type="text"
+                dir="ltr"
+                value={jevCfg.decision_model}
+                onChange={(e) => setJevCfg((prev) => ({ ...prev, decision_model: e.target.value }))}
+                placeholder="auto:fast"
+                className="rounded border border-borderline bg-canvas px-2 py-1.5 text-end font-mono"
+              />
+            </div>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={jevCfg.fallback_to_lead} onChange={(e) => setJevCfg((prev) => ({ ...prev, fallback_to_lead: e.target.checked }))} />
+              <span>{locale === "ar" ? "الرجوع لقائد القناة (Chief of Staff) عند عدم التأكد" : "Fallback to channel lead when unsure"}</span>
+            </label>
+            <button type="submit" className="rounded-lg bg-primary px-3 py-1.5 font-semibold text-white">
+              {t("common.save")}
+            </button>
+          </form>
+        </section>
+
+        <section className="rounded-xl border border-borderline bg-surface p-4 space-y-3 text-xs">
+          <h2 className="text-sm font-bold">{t("phase5.triggers_title")}</h2>
+          <form onSubmit={createTriggerItem} className="grid gap-2 sm:grid-cols-2">
+            <input
+              value={newTrigName}
+              onChange={(e) => setNewTrigName(e.target.value)}
+              placeholder={locale === "ar" ? "اسم المحفّز" : "Trigger name"}
+              className="rounded border border-borderline bg-canvas px-2 py-1.5"
+            />
+            <select
+              value={newTrigType}
+              onChange={(e) => setNewTrigType(e.target.value as "schedule" | "event")}
+              className="rounded border border-borderline bg-canvas px-2 py-1.5"
+            >
+              <option value="schedule">schedule (cron)</option>
+              <option value="event">event</option>
+            </select>
+            {newTrigType === "schedule" ? (
+              <input
+                dir="ltr"
+                value={newTrigCron}
+                onChange={(e) => setNewTrigCron(e.target.value)}
+                placeholder="0 9 * * *"
+                className="rounded border border-borderline bg-canvas px-2 py-1.5 text-end font-mono"
+              />
+            ) : (
+              <input
+                dir="ltr"
+                value={newTrigEvent}
+                onChange={(e) => setNewTrigEvent(e.target.value)}
+                placeholder="event_name"
+                className="rounded border border-borderline bg-canvas px-2 py-1.5 text-end font-mono"
+              />
+            )}
+            <input
+              value={newTrigPrompt}
+              onChange={(e) => setNewTrigPrompt(e.target.value)}
+              placeholder={locale === "ar" ? "المهمة المطلوب تنفيذها..." : "Action prompt..."}
+              className="rounded border border-borderline bg-canvas px-2 py-1.5"
+            />
+            <button type="submit" className="rounded-lg bg-primary px-3 py-1.5 font-semibold text-white sm:col-span-2">
+              {locale === "ar" ? "إضافة محفّز" : "Add Trigger"}
+            </button>
+          </form>
+
+          <div className="max-h-44 space-y-1.5 overflow-y-auto">
+            {triggers.map((tr) => (
+              <div key={tr.id} className="flex flex-wrap items-center justify-between gap-2 rounded bg-canvas p-2">
+                <div>
+                  <span className="font-semibold">{tr.name}</span>{" "}
+                  <span className="font-mono text-[10px] text-muted">
+                    ({tr.trigger_type}: {tr.cron_expr || tr.event_name}) · fires: {tr.fire_count}
+                  </span>
+                </div>
+                <div className="flex gap-1.5">
+                  <button type="button" onClick={() => fireTriggerNow(tr.id)} className="rounded border border-borderline bg-surface px-2 py-0.5 text-[10px] hover:border-primary">
+                    {locale === "ar" ? "تشغيل الآن" : "Fire"}
+                  </button>
+                  <button type="button" onClick={() => deleteTriggerItem(tr.id)} className="text-danger">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {triggerHistory.length > 0 && (
+            <div className="border-t border-borderline pt-2 space-y-1">
+              <div className="text-[11px] font-semibold text-muted">{locale === "ar" ? "سجل التشغيل:" : "History:"}</div>
+              {triggerHistory.slice(0, 5).map((h) => (
+                <div key={h.id} className="flex items-center justify-between rounded bg-canvas px-2 py-1 text-[10px]">
+                  <span className="truncate">{h.action_summary}</span>
+                  <span className={h.status === "success" ? "text-success" : "text-danger"}>{h.status}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
 
       {/* 2b. Modes Presets (Zadloop + AFH + DeepSeek Harness) */}
       <section className="rounded-xl border border-borderline bg-surface p-4 space-y-4">

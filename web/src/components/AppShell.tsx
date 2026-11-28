@@ -99,6 +99,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     { href: "/", label: t("nav.chat"), icon: MessageSquare },
     { href: "/dashboard", label: t("nav.dashboard"), icon: LayoutDashboard },
     { href: "/coding", label: t("nav.coding_agent"), icon: Code2 },
+    { href: "/teams", label: t("nav.teams"), icon: Users },
+    { href: "/mcp", label: t("nav.mcp"), icon: Bot },
     { href: "/agents", label: t("nav.agents"), icon: Bot },
     { href: "/tasks/new", label: t("nav.new_task"), icon: PlusCircle },
     { href: "/runs", label: t("nav.runs"), icon: Activity },
