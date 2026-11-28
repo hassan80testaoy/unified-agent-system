@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
 from app.agents.base import AgentContext, KillSwitchTriggeredError
-from app.captcha.solver import CaptchaChallenge, dispatch_solve
+from app.captcha.solver import CaptchaChallenge, CaptchaResult, dispatch_solve
 from app.captcha.solvers.manual import pause_for_manual_captcha
 from app.config import get_settings
 from app.models.agents import RunItem
@@ -34,6 +34,7 @@ from app.security.crypto import decrypt_secret
 from app.services.google_account import ask_user_for_verification_code
 from app.services.mailbox import alias_for, fetch_and_find_verification_imap
 from app.services.session_replay import replay_backlink_session, save_backlink_session
+from app.services.captcha_inject import inject_token_via_worker
 from app.services.vault import create_server_generated_site_password
 
 DEFAULT_HOMEPAGE_ANCHORS = [
@@ -450,7 +451,11 @@ class BacklinkAgent:
 
                 # 4. Captcha Plugin Check (generic dispatch through CaptchaSolver interface)
                 solver = ctx.captcha_solver
-                proxy_val = str(task_input.get("proxy") or "").strip() or None
+                proxy_val = (
+                    str(task_input.get("proxy") or "").strip()
+                    or (get_settings().residential_proxy or "").strip()
+                    or None
+                )
                 challenge: CaptchaChallenge | None = None
                 if mock_mode:
                     if site.domain in simulate_captcha_sites:
@@ -498,6 +503,32 @@ class BacklinkAgent:
                     if not challenge.proxy and proxy_val:
                         challenge.proxy = proxy_val
                     cap_res = await dispatch_solve(solver, challenge)
+                    # --- Captcha plugin pack: inject the token, or it is worthless ---
+                    # A "passed" solve only means a token was obtained. It must be
+                    # injected into the SAME live browser session/IP right now.
+                    # If injection fails (or there is no live worker), fall to manual.
+                    if cap_res.status == "passed":
+                        _token = (cap_res.instructions or {}).get("token") or ""
+                        _field = (cap_res.instructions or {}).get("token_field") or "g-recaptcha-response"
+                        if _token and get_settings().browser_worker_url:
+                            _inj = await inject_token_via_worker(
+                                worker_url=get_settings().browser_worker_url,
+                                run_id=ctx.run.id,
+                                profile_id=f"google_{google_acct.id}" if google_acct else "default",
+                                url=challenge.page_url,
+                                token=_token,
+                                token_field=_field,
+                                challenge_type=challenge.challenge_type,
+                                proxy=proxy_val,
+                            )
+                            _token = ""  # wipe immediately after use
+                            cap_res.instructions = {}
+                            if _inj != "completed":
+                                cap_res = CaptchaResult(
+                                    status="skipped", method=cap_res.method,
+                                    blocked_reason=f"captcha_inject_{_inj}",
+                                    duration_ms=cap_res.duration_ms, cost_usd=0.0,
+                                )
                     if cap_res.status == "passed":
                         db.add(
                             CaptchaAttempt(

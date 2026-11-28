@@ -8,12 +8,16 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.captcha.solver import CaptchaChallenge, CaptchaSolver, get_captcha_solver
+from app.config import get_settings
 from app.captcha.solvers.manual import ManualSolver, manual_captcha_coordinator, pause_for_manual_captcha
 from app.models.agents import AgentModel, Run, Task
 from app.models.captcha import CaptchaAttempt
 
 
-def test_captcha_plugin_interface_and_detection():
+def test_captcha_plugin_interface_and_detection(monkeypatch):
+    # Isolate from a real .env: the configured solver comes from .env.
+    monkeypatch.setenv("CAPTCHA_SOLVER", "")
+    get_settings.cache_clear()
     solver = get_captcha_solver()
     assert isinstance(solver, ManualSolver)
     assert isinstance(solver, CaptchaSolver)

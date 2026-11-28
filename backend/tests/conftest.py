@@ -80,3 +80,11 @@ def owner_session(client: TestClient) -> dict:
     data = resp.json()
     headers = {"Authorization": f"Bearer {data['access_token']}"}
     return {"data": data, "headers": headers, "client": client}
+# Captcha plugin pack (stealth mode): if solver modules live outside the repo
+# (CAPTCHA_PLUGIN_DIR), register them so test imports keep working.
+try:
+    from app.captcha.solver import _load_external_plugins
+
+    _load_external_plugins()
+except Exception:  # noqa: BLE001 - a missing loader must not break the suite
+    pass

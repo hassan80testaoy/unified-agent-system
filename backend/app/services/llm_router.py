@@ -95,6 +95,22 @@ def seed_default_providers(db: Session, workspace_id: str) -> list[Provider]:
             db.add(row)
             created_or_existing.append(row)
         else:
+            if not existing.enabled and get_env_secret_by_ref(existing.auth_ref):
+                existing.enabled = True
+            if existing.id == "openrouter-free":
+                retired_free = {
+                    "meta-llama/llama-3.2-3b-instruct:free",
+                    "meta-llama/llama-3.3-70b-instruct:free",
+                    "google/gemma-3-27b-it:free",
+                }
+                cur_models = dict(existing.models_json or {})
+                changed = False
+                for tier_k, m_val in list(cur_models.items()):
+                    if m_val in retired_free:
+                        cur_models[tier_k] = "openrouter/free"
+                        changed = True
+                if changed:
+                    existing.models_json = cur_models
             created_or_existing.append(existing)
     db.flush()
     return created_or_existing
@@ -348,6 +364,9 @@ def _call_provider_http(
     if not api_key:
         raise ProviderUnavailableError(f"missing_api_key:{provider.id}")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    if "openrouter.ai" in provider.api_base.lower():
+        headers["HTTP-Referer"] = "http://localhost:3010"
+        headers["X-Title"] = "Unified Agent System"
     payload = {
         "model": model,
         "messages": [
@@ -651,7 +670,7 @@ class LLMRouter:
                             cost_usd=0.0,
                             latency_ms=int((time.monotonic() - start) * 1000),
                             ok=False,
-                            error_code=type(exc).__name__,
+                            error_code=(scrub_text(str(exc)) or type(exc).__name__)[:64],
                         )
                     )
                     self.db.flush()

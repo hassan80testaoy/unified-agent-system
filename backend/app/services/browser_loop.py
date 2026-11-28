@@ -8,7 +8,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.agents.backlink.agent import check_url_noindex, seed_backlink_defaults, verify_live_link_url
-from app.captcha.solver import CaptchaChallenge, dispatch_solve, get_captcha_solver
+from app.captcha.solver import CaptchaChallenge, CaptchaResult, dispatch_solve, get_captcha_solver
+from app.config import get_settings
 from app.models.agents import Run
 from app.models.backlinks import (
     BlAccount,
@@ -23,6 +24,7 @@ from app.models.backlinks import (
 from app.models.google_account import GoogleAccount
 from app.security.sanitizer import scrub_text
 from app.services.session_replay import replay_backlink_session, save_backlink_session
+from app.services.captcha_inject import inject_token_via_worker
 from app.services.vault import create_server_generated_site_password
 
 
@@ -45,6 +47,10 @@ async def run_flagship_backlink_loop(
 ) -> dict[str, Any]:
     """Execute the 9-step Flagship Backlink Loop cleanly (open -> verify -> report)."""
     seed_backlink_defaults(db, workspace_id)
+    # Default the browser proxy from .env when the caller (e.g. chat) did
+    # not pass one — otherwise the browser runs direct and any solver
+    # token solved via the proxy IP is rejected (token/IP mismatch).
+    proxy = (proxy or "").strip() or (get_settings().residential_proxy or "").strip() or None
     clean_domain = domain.strip().lower().removeprefix("https://").removeprefix("http://").split("/")[0]
     stages: list[dict[str, Any]] = []
 
@@ -171,6 +177,32 @@ async def run_flagship_backlink_loop(
                 proxy=proxy,
             )
         cap_res = await dispatch_solve(active_solver, challenge)
+        # --- Captcha plugin pack: inject the token into the live session now ---
+        # A "passed" solve only means a token was obtained. Without injection
+        # in the same session/IP the token is worthless, so a failed injection
+        # falls back to manual like any other failed solve.
+        if cap_res.status == "passed":
+            _token = (cap_res.instructions or {}).get("token") or ""
+            _field = (cap_res.instructions or {}).get("token_field") or "g-recaptcha-response"
+            if _token and get_settings().browser_worker_url:
+                _inj = await inject_token_via_worker(
+                    worker_url=get_settings().browser_worker_url,
+                    run_id=run.id if run else "",
+                    profile_id="default",
+                    url=challenge.page_url,
+                    token=_token,
+                    token_field=_field,
+                    challenge_type=challenge.challenge_type,
+                    proxy=proxy,
+                )
+                _token = ""  # wipe immediately after use
+                cap_res.instructions = {}
+                if _inj != "completed":
+                    cap_res = CaptchaResult(
+                        status="skipped", method=cap_res.method,
+                        blocked_reason=f"captcha_inject_{_inj}",
+                        duration_ms=cap_res.duration_ms, cost_usd=0.0,
+                    )
         if cap_res.status != "passed":
             site.status = "needs_captcha_manual"
             site.blocked_reason = cap_res.blocked_reason or "captcha_manual"

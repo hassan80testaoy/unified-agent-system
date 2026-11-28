@@ -23,8 +23,9 @@ providers:
     api_base: https://openrouter.ai/api/v1
     auth: env:OPENROUTER_API_KEY
     models:
-      cheap: meta-llama/llama-3.3-70b-instruct:free
-      mid: google/gemma-3-27b-it:free
+      strong: openrouter/free
+      mid: openrouter/free
+      cheap: openrouter/free
     budget_usd_daily: 0.0
     enabled: true
 
@@ -105,10 +106,46 @@ providers:
   # --- كابتشا (بلجن منفصل — مش شغل البيلدر) ---
   - id: passxapi
     kind: captcha
+    solver: passxapi
     api_base: https://www.passxapi.com
     auth: env:PASSXAPI_API_KEY
-    budget_usd_daily: 0.0  # 0 = رصيد مجاني فقط، ثم يدوي. لا صرف من غير موافقة صريحة.
-    enabled: false  # الافتراضي: يدوي. البلجن بيتفعّل على جهازك بعد التسليم.
+    budget_usd_daily: 0.0
+    enabled: false
+
+  # --- حزمة مزودي الكابتشا (Fallback) — كلها معطّلة افتراضياً، فعّل اللي عندك مفتاحه ---
+  - id: twocaptcha
+    kind: captcha
+    solver: 2captcha
+    api_base: https://api.2captcha.com
+    auth: env:TWOCAPTCHA_API_KEY
+    budget_usd_daily: 0.0
+    enabled: false
+  - id: anticaptcha
+    kind: captcha
+    solver: anticaptcha
+    api_base: https://api.anti-captcha.com
+    auth: env:ANTICAPTCHA_API_KEY
+    budget_usd_daily: 0.0
+    enabled: false
+  - id: capsolver
+    kind: captcha
+    solver: capsolver
+    api_base: https://api.capsolver.com
+    auth: env:CAPSOLVER_API_KEY
+    budget_usd_daily: 0.0
+    enabled: false
+  - id: capmonster
+    kind: captcha
+    solver: capmonster
+    api_base: https://api.capmonster.cloud
+    auth: env:CAPMONSTER_API_KEY
+    budget_usd_daily: 0.0
+    enabled: false
+  - id: captcha-chain
+    kind: captcha
+    solver: chain
+    budget_usd_daily: 0.0
+    enabled: false  # فعّل دي لوحدها لو عايز Fallback تلقائي بين كل المزودين
 
 # حساب جوجل (منفصل — بيتضاف من Settings > Google Account عبر Vault فقط، مش هنا)
 google:

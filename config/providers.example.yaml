@@ -47,9 +47,9 @@ providers:
     api_base: https://openrouter.ai/api/v1
     auth: env:OPENROUTER_API_KEY
     models:
-      strong: meta-llama/llama-3.3-70b-instruct:free
-      mid: google/gemma-3-27b-it:free
-      cheap: meta-llama/llama-3.2-3b-instruct:free
+      strong: openrouter/free
+      mid: openrouter/free
+      cheap: openrouter/free
     budget_usd_daily: 0.0
     budget_usd_monthly: 0.0
     enabled: false

@@ -81,6 +81,34 @@ def _parse_proxy(proxy_url: str | None) -> dict[str, str] | None:
     return cfg
 
 
+def _ignore_https_errors() -> bool:
+    """Whether Chromium should ignore TLS errors.
+
+    MITM residential proxies (e.g. Scrape.do Proxy Mode, pm.scrape.do) re-sign
+    TLS with their own CA, which Chromium rejects unless cert errors are
+    ignored. Default ON whenever a proxy is configured; set
+    BROWSER_IGNORE_HTTPS_ERRORS=false to disable. The proper alternative is
+    installing the proxy vendor's CA certificate in the OS trust store.
+    """
+    raw = os.environ.get("BROWSER_IGNORE_HTTPS_ERRORS", "").strip().lower()
+    return raw not in ("0", "false", "no")
+
+
+def _launch_kwargs(profile_dir: Path, proxy_url: str | None) -> dict[str, Any]:
+    """Shared launch_persistent_context kwargs for both endpoints."""
+    proxy_cfg = _parse_proxy(proxy_url or os.environ.get("BROWSER_PROXY_URL"))
+    kwargs: dict[str, Any] = {
+        "user_data_dir": str(profile_dir),
+        "headless": os.environ.get("BROWSER_HEADLESS", "false").lower() == "true",
+        "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+    }
+    if proxy_cfg:
+        kwargs["proxy"] = proxy_cfg
+        if _ignore_https_errors():
+            kwargs["ignore_https_errors"] = True
+    return kwargs
+
+
 def _detect_challenge_from_html(html: str) -> dict[str, Any] | None:
     lower = html.lower()
     site_key = _extract_site_key(html)
@@ -120,14 +148,7 @@ async def run_steps(req: ExecuteStepsRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Invalid profile_id")
     profile_dir.mkdir(parents=True, exist_ok=True)
 
-    proxy_cfg = _parse_proxy(req.proxy or os.environ.get("BROWSER_PROXY_URL"))
-    launch_kwargs: dict[str, Any] = {
-        "user_data_dir": str(profile_dir),
-        "headless": os.environ.get("BROWSER_HEADLESS", "false").lower() == "true",
-        "args": ["--no-sandbox", "--disable-dev-shm-usage"],
-    }
-    if proxy_cfg:
-        launch_kwargs["proxy"] = proxy_cfg
+    launch_kwargs = _launch_kwargs(profile_dir, req.proxy)
 
     recorded_steps: list[dict[str, Any]] = []
     async with _WRITE_LEASE:
@@ -188,5 +209,78 @@ async def run_steps(req: ExecuteStepsRequest) -> dict[str, Any]:
                     "current_url": page.url,
                     "steps": recorded_steps,
                 }
+            finally:
+                await context.close()
+
+
+# --- Captcha token injection (OPT-IN PLUGIN PACK — conflicts with AGENTS.md rule 2) ---
+# Re-opens the SAME persistent profile (cookies/login survive), injects the token
+# obtained by a solver plugin, and reports whether the challenge is gone.
+# Token is used immediately, never logged or stored. No fingerprint spoofing.
+# Enable only together with a solver plugin (passxapi / 2captcha / anticaptcha /
+# capsolver / capmonster / chain) + a residential proxy matching the browser IP.
+
+
+class InjectTokenRequest(BaseModel):
+    run_id: str
+    profile_id: str = Field(default="default", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    url: str
+    token: str
+    token_field: str = "g-recaptcha-response"
+    challenge_type: str = "recaptcha"
+    proxy: str | None = None
+    submit_selector: str | None = None
+
+
+@app.post("/sessions/inject-captcha-token")
+async def inject_captcha_token(req: InjectTokenRequest) -> dict[str, Any]:
+    """Inject a solver token into the SAME persistent profile and submit.
+
+    Token is used immediately and never logged or stored.
+    Returns {"status": "completed"} when no challenge remains on the page,
+    {"status": "still_challenged"} when the challenge is still present.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"Playwright unavailable: {exc}")
+
+    profile_dir = (PROFILES_DIR / req.profile_id).resolve()
+    if not str(profile_dir).startswith(str(PROFILES_DIR)):
+        raise HTTPException(status_code=400, detail="Invalid profile_id")
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    launch_kwargs = _launch_kwargs(profile_dir, req.proxy)
+
+    async with _WRITE_LEASE:
+        async with async_playwright() as p:
+            context = await p.chromium.launch_persistent_context(**launch_kwargs)
+            page = context.pages[0] if context.pages else await context.new_page()
+            try:
+                await page.goto(req.url, wait_until="domcontentloaded", timeout=30000)
+                await page.evaluate(
+                    """([field, token]) => {
+                      let el = document.getElementById(field) || document.querySelector('[name="' + field + '"]');
+                      if (!el) {
+                        el = document.createElement('textarea');
+                        el.id = field; el.name = field; el.style.display = 'none';
+                        (document.querySelector('form') || document.body).appendChild(el);
+                      }
+                      const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                      const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                      setter.call(el, token);
+                      el.dispatchEvent(new Event('input', {bubbles: true}));
+                      el.dispatchEvent(new Event('change', {bubbles: true}));
+                      return true;
+                    }""",
+                    [req.token_field, req.token],
+                )
+                if req.submit_selector:
+                    await page.locator(req.submit_selector).first.click(timeout=10000)
+                    await page.wait_for_timeout(3000)
+                html = await page.content()
+                if _detect_challenge_from_html(html):
+                    return {"status": "still_challenged", "current_url": page.url}
+                return {"status": "completed", "current_url": page.url}
             finally:
                 await context.close()
